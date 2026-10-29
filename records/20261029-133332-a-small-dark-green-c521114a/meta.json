@@ -68,7 +68,8 @@
     "explore": 5,
     "write_build": 2,
     "validate": 2,
-    "finalize": 1
+    "finalize": 1,
+    "render": 2
   },
   "timing": {
     "total": 103.599,
@@ -78,7 +79,8 @@
       "explore": 3.813,
       "write_build": 0.06,
       "validate": 2.787,
-      "finalize": 2.017
+      "finalize": 2.017,
+      "render": 7.221
     },
     "other": 6.183
   },

@@ -1,0 +1,40 @@
+{
+  "ok": true,
+  "source_sha256": "dacb9348534ae94fff1dca58fb05f2ceee9922f85e57056e2c4c7f8de27cb65c",
+  "build_error": null,
+  "error_type": null,
+  "checks": [
+    {
+      "name": "no_floating",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "no_collisions",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "connected",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "only_owned_parts",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "roof rises above walls",
+      "passed": true,
+      "detail": null
+    }
+  ],
+  "dimensions": {
+    "width": 6.0,
+    "depth": 4.0,
+    "height": 3.6666666666666665
+  },
+  "brick_count": 22,
+  "stdout": ""
+}

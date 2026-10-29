@@ -1,0 +1,40 @@
+{
+  "ok": false,
+  "source_sha256": "f8e71e236657177e0d45debc1f8d3046d5bb2656ebe3a4ee1acacd1e90fd842e",
+  "build_error": null,
+  "error_type": null,
+  "checks": [
+    {
+      "name": "no_floating",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "no_collisions",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "connected",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "only_owned_parts",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "house has walls and roof",
+      "passed": false,
+      "detail": "parts=22"
+    }
+  ],
+  "dimensions": {
+    "width": 6.0,
+    "depth": 4.0,
+    "height": 3.6666666666666665
+  },
+  "brick_count": 22,
+  "stdout": ""
+}
