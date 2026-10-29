@@ -1,0 +1,6 @@
+[
+  {"part": "3001", "color": "RED", "count": 8},
+  {"part": "3003", "color": "RED", "count": 6},
+  {"part": "3001", "color": "WHITE", "count": 4},
+  {"part": "3031", "color": "GREEN", "count": 2}
+]
