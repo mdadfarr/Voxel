@@ -1,0 +1,10 @@
+{
+  "ok": false,
+  "source_sha256": "e7b8c25b6a8f0b580dba614ef9d6c854e4a19f8cf2171aa63ccf5f3a5bf0eb38",
+  "build_error": "Traceback (most recent call last):\n  File \"C:\\Users\\arshi\\Desktop\\voxel\\Voxel\\.venv\\Lib\\site-packages\\brickwright\\tools\\validation.py\", line 149, in build_and_validate\n    module = build_execution.load_build_module(build_path, source)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\arshi\\Desktop\\voxel\\Voxel\\.venv\\Lib\\site-packages\\brickwright\\tools\\build_execution.py\", line 43, in load_build_module\n    compile(\n  File \"records\\20261029-132838-a-small-dark-green-1577d1af\\build.py\", line 44\n    build.add(bl.Element(\"3004\", DG), (1, 2, 2), bl.Rotation.DEG_0)\nIndentationError: unexpected indent\n",
+  "error_type": "IndentationError",
+  "checks": [],
+  "dimensions": null,
+  "brick_count": null,
+  "stdout": ""
+}

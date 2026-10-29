@@ -1,0 +1,50 @@
+{
+  "ok": true,
+  "source_sha256": "a6e0e0fd88d1983a5e31d7f2b7240fc98cc48d1f5bca8b7717dd9c158c478bb9",
+  "build_error": null,
+  "error_type": null,
+  "checks": [
+    {
+      "name": "no_floating",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "no_collisions",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "connected",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "only_owned_parts",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "all parts dark green",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "small tower (under 40 parts)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tower is taller than wide",
+      "passed": true,
+      "detail": null
+    }
+  ],
+  "dimensions": {
+    "width": 4.0,
+    "depth": 4.0,
+    "height": 5.499999999999999
+  },
+  "brick_count": 26,
+  "stdout": ""
+}

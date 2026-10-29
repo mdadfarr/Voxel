@@ -1,0 +1,26 @@
+[
+  {
+    "set_num": "10242-1",
+    "part_num": "16681",
+    "name": "Sticker Sheet 1 for Sets 10242-1, 10242-2",
+    "color_name": "[No Color/Any Color]",
+    "quantity": 1,
+    "reason": "Rebrickable lists no LDraw id for this part; Rebrickable lists no LDraw color for this part"
+  },
+  {
+    "set_num": "10242-1",
+    "part_num": "15920",
+    "name": "Sticker Sheet 2 for Sets 10242-1, 10242-2",
+    "color_name": "[No Color/Any Color]",
+    "quantity": 1,
+    "reason": "Rebrickable lists no LDraw id for this part; Rebrickable lists no LDraw color for this part"
+  },
+  {
+    "set_num": "10242-1",
+    "part_num": "16280pr0001",
+    "name": "Blanket, Red Chequers Print (Picnic)",
+    "color_name": "White",
+    "quantity": 1,
+    "reason": "LDraw id 16280p01 is not in BrickLayer's catalog"
+  }
+]

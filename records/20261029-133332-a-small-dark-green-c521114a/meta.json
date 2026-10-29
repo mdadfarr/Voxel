@@ -1,0 +1,101 @@
+{
+  "id": "20261029-133332-a-small-dark-green-c521114a",
+  "created": "2026-10-29T13:33:32-04:00",
+  "status": "valid",
+  "validated_source_sha256": "a6e0e0fd88d1983a5e31d7f2b7240fc98cc48d1f5bca8b7717dd9c158c478bb9",
+  "exported_source_sha256": "a6e0e0fd88d1983a5e31d7f2b7240fc98cc48d1f5bca8b7717dd9c158c478bb9",
+  "finalized": true,
+  "stop_reason": "finalized",
+  "over_budget": false,
+  "prompt": "a small dark green tower\n\nHARD RULE: use ONLY the parts listed below, in those colors, and never more than the count given. Do not use any other part or color.\nFormat: part id | name | color | count owned\n10314 | Brick 1 x 4 x 1.333 with Curved Top without Understuds | Dark Green | 2\n11090 | Bar Tube with Clip | Black | 1\n11212 | Plate 3 x 3 | Dark Bluish Gray | 4\n11215 | Bracket 5 x 2 x 1.333 with Understud in Centre | Black | 8\n11458 | Plate 1 x 2 with Offset Peghole | Dark Bluish Gray | 1\n11477 | Slope Brick Curved 2 x 1 | White | 4\n11477 | Slope Brick Curved 2 x 1 | Light Bluish Gray | 2\n11477 | Slope Brick Curved 2 x 1 | Metallic Silver | 4\n11477 | Slope Brick Curved 2 x 1 | Dark Green | 8\n12825 | Tile 1 x 1 with Clip with Rounded Tips | Yellow | 2\n13547 | Slope Brick Curved 4 x 1 Inverted | Black | 4\n14769p06 | Tile 2 x 2 Round with Round Underside Stud with Black and Dark Bluish Grey Grid Pattern | Light Bluish Gray | 2\n15068 | Slope Brick Curved 2 x 2 x 0.667 | White | 18\n15573 | Plate 1 x 2 with Groove with 1 Centre Stud, without Understud | Light Bluish Gray | 29\n2343 | Minifig Goblet | Trans Clear | 2\n2412b | Tile 1 x 2 Grille with Groove | Black | 6\n2412b | Tile 1 x 2 Grille with Groove | Reddish Brown | 8\n2412b | Tile 1 x 2 Grille with Groove | Pearl Silver | 8\n2412b | Tile 1 x 2 Grille with Groove | Pearl Gold | 1\n2420 | Plate 2 x 2 Corner | Reddish Brown | 10\n2431 | Tile 1 x 4 with Groove | Black | 2\n2431 | Tile 1 x 4 with Groove | White | 4\n2431 | Tile 1 x 4 with Groove | Dark Green | 28\n2432 | Tile 1 x 2 with Handle | Light Bluish Gray | 2\n2540 | Plate 1 x 2 with Handle | Tan | 2\n2540 | Plate 1 x 2 with Handle | Dark Bluish Gray | 1\n2694 | Windscreen 3 x 10 x 3 | Trans Brown | 2\n2736 | Technic Axle Towball | Light Bluish Gray | 1\n2741 | Technic Steering Wheel Large | Black | 1\n2780 | Technic Pin with Friction and Slots | Black | 28\n2817 | Plate 2 x 2 with Holes | Black | 2\n28653 | Plate 1 x 2 | Black | 4\n28653 | Plate 1 x 2 | Tan | 18\n28653 | Plate 1 x 2 | Trans Brown | 6\n28653 | Plate 1 x 2 | Reddish Brown | 4\n28653 | Plate 1 x 2 | Light Bluish Gray | 6\n28653 | Plate 1 x 2 | Dark Green | 38\n28964 | Bracket 5 x 2 x 2.333 with Inside Fillets with Reinforced Bottom | Light Bluish Gray | 4\n3002 | Brick 2 x 3 | Black | 3\n3004 | Brick 1 x 2 | Tan | 5\n3004 | Brick 1 x 2 | Reddish Brown | 12\n3004 | Brick 1 x 2 | Dark Green | 6\n3005 | Brick 1 x 1 | White | 2\n3005 | Brick 1 x 1 | Dark Tan | 6\n3005 | Brick 1 x 1 | Dark Green | 12\n30069 | Brick 1 x 1 with Headlight | Dark Bluish Gray | 6\n3009 | Brick 1 x 6 | Reddish Brown | 4\n3010 | Brick 1 x 4 | Black | 1\n3010 | Brick 1 x 4 | Dark Green | 11\n30151 | Cylinder 2 x 2 x 1.667 with Dome Top and Blocked Hollow Stud | Trans Clear | 1\n3020 | Plate 2 x 4 | Black | 4\n3020 | Plate 2 x 4 | Tan | 8\n3020 | Plate 2 x 4 | Dark Green | 13\n3021 | Plate 2 x 3 | Light Bluish Gray | 10\n3021 | Plate 2 x 3 | Dark Green | 6\n3022 | Plate 2 x 2 | Reddish Brown | 4\n3024 | Plate 1 x 1 | Black | 10\n3024 | Plate 1 x 1 | Red | 3\n3024 | Plate 1 x 1 | Tan | 10\n3024 | Plate 1 x 1 | Trans Brown | 3\n3024 | Plate 1 x 1 | Trans Clear | 3\n3024 | Plate 1 x 1 | Trans Orange | 6\n3024 | Plate 1 x 1 | Reddish Brown | 5\n3024 | Plate 1 x 1 | Light Bluish Gray | 10\n3024 | Plate 1 x 1 | Dark Green | 25\n3032 | Plate 4 x 6 | Dark Bluish Gray | 1\n3034 | Plate 2 x 8 | Light Bluish Gray | 1\n3035 | Plate 4 x 8 | Black | 3\n3035 | Plate 4 x 8 | White | 1\n30350b | Tile 2 x 3 with Clips Horizontal (Thick C-Clips) | Dark Bluish Gray | 1\n30367c | Cylinder 2 x 2 with Dome Top with Axle Hole and Hollow Stud | Dark Bluish Gray | 1\n30374 | Bar 4L Lightsaber Blade | Black | 1\n30374 | Bar 4L Lightsaber Blade | Light Bluish Gray | 2\n30414 | Brick 1 x 4 with Studs on Side | Red | 1\n30414 | Brick 1 x 4 with Studs on Side | Dark Green | 6\n3068b | Tile 2 x 2 with Groove | Red | 1\n3068b | Tile 2 x 2 with Groove | Tan | 6\n3068b | Tile 2 x 2 with Groove | Reddish Brown | 1\n3068b | Tile 2 x 2 with Groove | Dark Green | 4\n3069b | Tile 1 x 2 with Groove | Tan | 6\n3069b | Tile 1 x 2 with Groove | Trans Brown | 2\n3069b | Tile 1 x 2 with Groove | Dark Bluish Gray | 6\n3069bpc1 | Tile 1 x 2 with Yellow Buttons and Knob Controls Pattern | Dark Bluish Gray | 1\n3070b | Tile 1 x 1 with Groove | Black | 2\n3070b | Tile 1 x 1 with Groove | White | 21\n3070b | Tile 1 x 1 with Groove | Tan | 24\n3070b | Tile 1 x 1 with Groove | Dark Tan | 15\n3070b | Tile 1 x 1 with Groove | Trans Red | 6\n3070b | Tile 1 x 1 with Groove | Reddish Brown | 3\n3070b | Tile 1 x 1 with Groove | Light Bluish Gray | 5\n3070b | Tile 1 x 1 with Groove | Dark Green | 15\n3176 | Plate 3 x 2 with Hole | Dark Green | 2\n32000 | Technic Brick 1 x 2 with Holes | Black | 4\n32013 | Technic Angle Connector #1 | Dark Bluish Gray | 1\n32028 | Plate 1 x 2 with Door Rail | Dark Bluish Gray | 6\n32123b | Technic Bush 1/2 Smooth with Axle Hole Semi-Reduced | Yellow | 5\n32123b | Technic Bush 1/2 Smooth with Axle Hole Semi-Reduced | Light Bluish Gray | 3\n32523 | Technic Beam 3 | Metallic Silver | 4\n3456 | Plate 6 x 14 | Light Bluish Gray | 1\n3460 | Plate 1 x 8 | Black | 5\n3623 | Plate 1 x 3 | Black | 4\n3623 | Plate 1 x 3 | White | 1\n3623 | Plate 1 x 3 | Reddish Brown | 3\n3623 | Plate 1 x 3 | Dark Green | 18\n3660b | Slope Brick 45 2 x 2 Inverted with Flat Bottom Pin with Inner Stopper Ring | Dark Green | 4\n3665a | Slope Brick 45 2 x 1 Inverted without Inner Stopper Ring | Black | 7\n3666 | Plate 1 x 6 | White | 1\n3666 | Plate 1 x 6 | Light Bluish Gray | 6\n3666 | Plate 1 x 6 | Dark Green | 8\n3700 | Technic Brick 1 x 2 with Hole | Light Bluish Gray | 2\n3710 | Plate 1 x 4 | Black | 8\n3710 | Plate 1 x 4 | Tan | 7\n3710 | Plate 1 x 4 | Dark Green | 6\n3794b | Plate 1 x 2 with Groove with 1 Centre Stud | Reddish Brown | 2\n3832 | Plate 2 x 10 | Tan | 5\n3832 | Plate 2 x 10 | Dark Bluish Gray | 5\n3894 | Technic Brick 1 x 6 with Holes | Black | 4\n3895 | Technic Brick 1 x 12 with Holes | Black | 2\n3895 | Technic Brick 1 x 12 with Holes | Blue | 4\n3937 | Hinge 1 x 2 Base | Dark Bluish Gray | 2\n3941 | Brick 2 x 2 Round without Reinforcement | Trans Light Blue | 1\n4032a | Plate 2 x 2 Round with Axlehole | Dark Bluish Gray | 2\n4073 | Plate 1 x 1 Round | Black | 10\n4073 | Plate 1 x 1 Round | Red | 2\n4073 | Plate 1 x 1 Round | Trans Clear | 3\n4073 | Plate 1 x 1 Round | Metallic Silver | 7\n4073 | Plate 1 x 1 Round | Pearl Gold | 3\n4081b | Plate 1 x 1 with Clip Light Type 2 | Black | 4\n4150 | Tile 2 x 2 Round with Cross Underside Stud | Dark Green | 2\n4162 | Tile 1 x 8 | Black | 1\n4162 | Tile 1 x 8 | Light Bluish Gray | 1\n4162 | Tile 1 x 8 | Dark Bluish Gray | 5\n42446 | Bracket 1 x 1 - 1 x 1 Thin with Stud Hole | Reddish Brown | 3\n4274 | Technic Pin 1/2 | Blue | 9\n43093 | Technic Axle Pin with Friction | Blue | 3\n4342 | Minifig Food French Bread | Medium Nougat | 1\n44309 | Tyre 22/ 30 x 30 ZR | Black | 4\n4460b | Slope Brick 75 2 x 1 x 3 with Hollow Stud | Dark Green | 4\n44728 | Bracket 1 x 2 - 2 x 2 Down | Dark Bluish Gray | 1\n4510 | Plate 1 x 8 with Door Rail | Dark Bluish Gray | 3\n4735 | Brick 1 x 1 x 0.667 Round with Bar and Clip Vertical | Black | 2\n4740 | Dish 2 x 2 Inverted | Trans Clear | 4\n4740 | Dish 2 x 2 Inverted | Light Bluish Gray | 2\n48336 | Plate 1 x 2 with Handle Type 2 | Red | 2\n48724 | Bracket 1 x 1 - 1 x 1 with Pin | Black | 1\n53451 | Minifig Helmet Viking Horn | Black | 5\n54200 | Slope Brick 31 1 x 1 x 0.667 | Red | 3\n54200 | Slope Brick 31 1 x 1 x 0.667 | Yellow | 2\n54200 | Slope Brick 31 1 x 1 x 0.667 | White | 10\n54200 | Slope Brick 31 1 x 1 x 0.667 | Tan | 3\n54200 | Slope Brick 31 1 x 1 x 0.667 | Dark Tan | 5\n54200 | Slope Brick 31 1 x 1 x 0.667 | Bright Light Orange | 2\n54200 | Slope Brick 31 1 x 1 x 0.667 | Dark Green | 15\n56145 | Wheel Rim 20 x 30 with 6 Dual Spokes and External Ribs | Light Bluish Gray | 4\n56898 | Tyre 14/ 43 x 30 with Offset Tread | Black | 1\n56904 | Wheel Rim 14 x 30 with 6 Spokes and No Pegholes | White | 1\n59349 | Panel 1 x 6 x 5 | Light Bluish Gray | 1\n60476 | Brick 1 x 1 with Clip Horizontal (Thick C-Clip) | White | 2\n60478 | Plate 1 x 2 with Handle on End | Black | 10\n60479 | Plate 1 x 12 | Black | 4\n60581 | Panel 1 x 4 x 3 Reinforced | Trans Brown | 2\n6081 | Brick 2 x 4 x 1.333 with Curved Top | Dark Green | 1\n6091 | Brick 2 x 1 x 1.333 with Curved Top | White | 10\n6091 | Brick 2 x 1 x 1.333 with Curved Top | Tan | 26\n6091 | Brick 2 x 1 x 1.333 with Curved Top | Reddish Brown | 8\n6091 | Brick 2 x 1 x 1.333 with Curved Top | Dark Green | 4\n6111 | Brick 1 x 10 | Dark Bluish Gray | 2\n61184 | Technic Pin 1/2 with Bar 2L | Light Bluish Gray | 1\n6134 | Hinge 2 x 2 Top | Black | 5\n61678 | Slope Brick Curved 4 x 1 | Tan | 8\n6191p01 | Brick 1 x 4 x 1.333 with Curved Top with White Stripes Pattern | Dark Green | 12\n62360 | Windscreen 3 x 6 x 1 Curved | Dark Green | 4\n62462 | Technic Pin Joiner Round with Slot | Metallic Silver | 13\n62701 | Wheel Cover 9 Spoke for Wheel 14 x 17 | Pearl Silver | 4\n63864 | Tile 1 x 3 | White | 2\n63864 | Tile 1 x 3 | Dark Bluish Gray | 4\n63864 | Tile 1 x 3 | Dark Green | 10\n63868 | Plate 1 x 2 with Clip Horizontal on End (Thick C-Clip) | Black | 6\n63965a | Bar 6L with Thick Stop | Reddish Brown | 1\n6541 | Technic Brick 1 x 1 with Hole | Black | 12\n6558 | Technic Pin Long with Friction and Slot | Blue | 11\n6636 | Tile 1 x 6 | Tan | 2\n73587p01 | Hinge Control Stick Base with Black Control Stick | White | 2\n73983 | Hinge Plate 1 x 4 (Complete) | Dark Green | 4\n87079 | Tile 2 x 4 | White | 12\n87079 | Tile 2 x 4 | Dark Bluish Gray | 2\n87083 | Technic Axle 4 with Stop | Dark Bluish Gray | 4\n87087 | Brick 1 x 1 with Stud on 1 Side | Black | 6\n87087 | Brick 1 x 1 with Stud on 1 Side | Dark Green | 24\n87544 | Panel 1 x 2 x 3 Reinforced | Trans Brown | 2\n91884 | Minifig Shield Round Type 2 | Pearl Silver | 2\n91988 | Plate 2 x 14 | Reddish Brown | 2\n92280 | Plate 1 x 2 with Single Clip on Top | Black | 4\n92280 | Plate 1 x 2 with Single Clip on Top | Red | 2\n93273 | Slope Brick Curved 4 x 1 Double | Tan | 2\n93555 | Minifig Skate | Pearl Silver | 3\n93604 | Slope Brick Curved 3 x 4 x 0.667 Rounded | Dark Green | 2\n96874 | Brick Separator with Top Axle | Orange | 1\n98138 | Tile 1 x 1 Round with Groove | Trans Orange | 3\n98138 | Tile 1 x 1 Round with Groove | Light Bluish Gray | 4\n98138pc1 | Tile 1 x 1 Round with Groove with Gauge with Red Pointer Pattern | Pearl Silver | 4\n99206 | Plate 2 x 2 x 0.667 with Two Studs On Side and Two Raised with Closed Understud | Black | 8\n99207 | Bracket 1 x 2 - 2 x 2 Up | Black | 4\n99207 | Bracket 1 x 2 - 2 x 2 Up | Red | 4\n99780 | Bracket 1 x 2 - 1 x 2 Up | Black | 3\n99781 | Bracket 1 x 2 - 1 x 2 Down | Light Bluish Gray | 1\n\nYour run_tests() must include `from voxel import check_owned` and a call `check_owned(tests)`. Do not remove, weaken or work around it.",
+  "prompt_image": null,
+  "generation": {
+    "model": "claude-haiku-5-5",
+    "effort": "high",
+    "external": false,
+    "config": {
+      "model": "claude-haiku-5-5",
+      "effort": "high",
+      "max_validations": 50,
+      "max_turns": 200,
+      "max_cost": 0.5,
+      "build_timeout": 30.0,
+      "render_timeout": 60.0,
+      "request_timeout": null,
+      "subagents_enabled": false,
+      "is_subagent": false,
+      "subagent_tiers": {
+        "openai": {
+          "smart": "openai/gpt-6-astra",
+          "balanced": "openai/gpt-6-sol",
+          "fast": "openai/gpt-6-luna"
+        },
+        "anthropic": {
+          "smart": "anthropic/claude-opus-4-8",
+          "balanced": "anthropic/claude-sonnet-5",
+          "fast": "anthropic/claude-haiku-4-5"
+        },
+        "google": {
+          "smart": "gemini/gemini-pro-latest",
+          "balanced": "gemini/gemini-flash-latest",
+          "fast": "gemini/gemini-flash-lite-latest"
+        }
+      },
+      "max_parallel_subagents": 4,
+      "subagent_max_turns": 100,
+      "subagent_max_cost": 1.0,
+      "max_critique_rounds": 0,
+      "critique_mode": "continue",
+      "critique_model": null,
+      "critique_effort": null,
+      "max_viewpoint_iterations": 6,
+      "viewpoint_model": null,
+      "viewpoint_effort": null
+    }
+  },
+  "turns": 10,
+  "validations": 2,
+  "validation_failures": {
+    "build_errors": {},
+    "failing_checks": {
+      "no_floating": 1,
+      "connected": 1
+    }
+  },
+  "critique_rounds": 0,
+  "tool_calls": {
+    "read_build": 1,
+    "explore": 5,
+    "write_build": 2,
+    "validate": 2,
+    "finalize": 1
+  },
+  "timing": {
+    "total": 103.599,
+    "llm": 88.739,
+    "tools": {
+      "read_build": 0.0,
+      "explore": 3.813,
+      "write_build": 0.06,
+      "validate": 2.787,
+      "finalize": 2.017
+    },
+    "other": 6.183
+  },
+  "usage": {
+    "prompt_tokens": 468431,
+    "completion_tokens": 17062,
+    "total_tokens": 485493,
+    "cost_usd": 0.019847,
+    "known_cost_usd": 0.019847,
+    "prompt_tokens_details": {
+      "cached_tokens": 410763
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 13278,
+      "accepted_prediction_tokens": null,
+      "rejected_prediction_tokens": null
+    }
+  },
+  "forked_from": null
+}

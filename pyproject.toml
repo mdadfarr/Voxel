@@ -3,8 +3,8 @@ name = "voxel"
 version = "0.1.0"
 description = "Design LEGO builds from only the pieces you own."
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = ["bricklayer-sdk"]
+requires-python = ">=3.11"
+dependencies = ["bricklayer-sdk", "brickwright", "mcp"]
 
 [project.optional-dependencies]
 dev = ["pytest"]

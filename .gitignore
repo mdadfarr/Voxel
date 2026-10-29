@@ -6,4 +6,4 @@ __pycache__/
 *.ldr
 .cache/
 inventory.json
-inventory.unusable.json
+inventory.unusable.jsonrecords/
