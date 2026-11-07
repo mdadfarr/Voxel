@@ -26,6 +26,48 @@ def response_cost(response: Any) -> float:
     return float(cost) if isinstance(cost, (int, float)) and cost >= 0 else 0.0
 
 
+class ReplyError(Exception):
+    """No usable reply after the retry. Carries what the calls cost."""
+
+    def __init__(self, message: str, cost_usd: float, attempts: int) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
+        self.attempts = attempts
+
+
+def call_with_retry(
+    complete: Callable[..., Any],
+    *,
+    model: str,
+    messages: list[dict],
+    parse: Callable[[str], Any],
+    max_tokens: int,
+    what: str,
+) -> tuple[Any, float, int]:
+    """One call; if `parse` raises ValueError, retry once with the error.
+
+    Returns (parsed value, total cost, attempts). Raises ReplyError after 2 failures.
+    """
+    messages = list(messages)
+    cost, error = 0.0, ""
+    for attempt in (1, 2):
+        response = complete(model=model, messages=messages, max_tokens=max_tokens)
+        cost += response_cost(response)
+        text = response_text(response)
+        try:
+            return parse(text), cost, attempt
+        except ValueError as err:
+            error = str(err)
+        messages += [
+            {"role": "assistant", "content": text or "(empty reply)"},
+            {
+                "role": "user",
+                "content": f"Your {what} was rejected: {error}\n\nReply with the corrected JSON object only.",
+            },
+        ]
+    raise ReplyError(f"No usable {what} after 2 attempts. Last error: {error}", cost, 2)
+
+
 def strip_fences(text: str) -> str:
     """Drop a ```json ... ``` wrapper around a reply, if there is one."""
     text = text.strip()
