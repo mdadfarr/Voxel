@@ -41,7 +41,21 @@ Then:
 python -m voxel.design "a small red tower" --inventory inventory.json --max-cost 0.5
 ```
 
-Before the builder runs, one planning call turns the request into a plan: a
+The run goes Expand -> Plan -> Build -> Review.
+
+First, Voxel asks you at most 3 questions about what the request leaves open
+(type, colors, size, key features). Each shows its default in brackets; press
+Enter to take it. Color questions only offer colors you own at least 20 pieces
+of. Then one call writes a detailed description: overall size (width and depth
+in studs, height in bricks, 1 brick = 3 plates), proportions between the parts,
+colors per part, the key features a person would recognize, and shaped parts
+for outlines and curves. The planner gets this description instead of the
+short request and turns each key feature into a checklist item. The questions,
+answers, description and features are saved as `expansion.json` in the record
+folder. Both calls see a short inventory summary (pieces and shaped parts per
+color), not the full part list.
+
+Then one planning call turns the request into a plan: a
 checklist, the sections of the object (size, position, colors, parts) and the
 owned parts it needs. The plan is saved as `plan.json` in the record folder.
 The builder gets the plan, the planned parts and a spare set (owned basic
@@ -58,8 +72,8 @@ the gate, the earlier build is kept. The reviews are saved as `review.json` in
 the record folder, one entry per round.
 
 The summary shows the review result and the total cost:
-`Cost: $X (expand $a + plan $b + build $c + review $d)`. Expand is a planned
-step that does not exist yet, so it is always $0.000 for now.
+`Cost: $X (expand $a + plan $b + build $c + review $d)`. Expand is the cost of
+the questions and description calls ($0.000 with `--no-expand`).
 
 Exit codes: 0 when the gate passed and the review passed or was skipped, 2 when
 the gate failed, 3 when the gate passed but the review still failed after 2
@@ -73,6 +87,10 @@ Flags:
 - `--max-cost`: USD cap per build round (default 0.5).
 - `--max-retries`: builder rounds after a failed gate (default 2).
 - `--inventory`: inventory file (default `inventory.json`).
+- `--no-questions`: do not ask; use every question's default answer. The
+  questions call still runs, to get the defaults.
+- `--no-expand`: skip the questions and the detailed description; plan from
+  the short request.
 
 ## Get an inventory from set numbers
 

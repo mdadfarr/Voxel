@@ -1,6 +1,14 @@
 """Design a build with the BrickWright agent, using only parts you own.
 
-First, one planning call (voxel.plan, Opus by default) turns the request into a
+Flow: Expand -> Plan -> Build -> Review.
+
+Expand (voxel.expand, Opus): Voxel asks you at most 3 questions about what the
+request leaves open (empty answer = the default shown in brackets), then writes
+a detailed description: size, proportions, colors per part and key features.
+It is saved as expansion.json in the record folder. --no-questions uses all
+defaults; --no-expand skips the step and plans from the short request.
+
+Then one planning call (voxel.plan, Opus by default) turns the request into a
 plan: a checklist, the sections of the object, and the owned parts it needs.
 The builder (Haiku by default) gets the plan, the planned parts and a spare set
 of basic bricks and plates, not the full inventory. The plan is saved as
@@ -38,6 +46,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .check import CheckResult, check_build
+from .expand import (
+    DEFAULT_EXPAND_MODEL,
+    Answer,
+    Expansion,
+    ExpandError,
+    Question,
+    ask_questions,
+    expand,
+)
 from .inventory import Inventory, PartKey, color_label, color_name, load_inventory
 from .plan import DEFAULT_PLAN_MODEL, Plan, PlanError, PlanResult, make_plan, part_name, spare_set
 from .review import DEFAULT_REVIEW_MODEL, Review, ReviewError, review_report
@@ -50,6 +67,7 @@ OWNED_CHECK = "voxel.design:check_owned"
 STEPS_CHECK = "voxel.steps:check_steps"
 DEFAULT_MODEL = "claude-haiku-5-5"  # the build model
 PLAN_FILE = "plan.json"
+EXPANSION_FILE = "expansion.json"
 REVIEW_FILE = "review.json"
 MAX_REVIEW_ROUNDS = 2
 GATE_TIMEOUT = 60.0
@@ -248,9 +266,7 @@ def warn(message: str) -> None:
 
 
 def save_reviews(record, reviews: list[dict]) -> Path:
-    path = Path(record.path) / REVIEW_FILE
-    path.write_text(json.dumps(reviews, indent=2) + "\n", encoding="utf-8")
-    return path
+    return save_json(record, REVIEW_FILE, reviews)
 
 
 # --- The outer loop -----------------------------------------------------------
@@ -277,6 +293,44 @@ class DesignResult:
         return self.expand_cost_usd + self.plan_cost_usd + self.build_cost_usd + self.review_cost_usd
 
 
+def collect_answers(questions: list[Question], ask=input, interactive: bool = True) -> list[Answer]:
+    """Ask each question on the terminal. An empty answer (or no input) means the default."""
+    answers = []
+    for q in questions:
+        options = f" ({', '.join(q.options)})" if q.options else ""
+        line = f"{q.text}{options} [{q.default}]"
+        typed = ""
+        if interactive:
+            try:
+                typed = ask(line + " ").strip()
+            except EOFError:
+                typed = ""
+        else:
+            print(f"{line} (default)")
+        answers.append(Answer(q, typed or q.default, typed=bool(typed)))
+    return answers
+
+
+def expansion_record(
+    request: str, answers: list[Answer], expansion: Expansion, cost_usd: float
+) -> dict:
+    return {
+        "request": request,
+        "questions": [a.question.model_dump() for a in answers],
+        "answers": [a.to_json() for a in answers],
+        "description": expansion.description,
+        "size": {**expansion.size.model_dump(), "height_unit": "bricks (1 brick = 3 plates)"},
+        "features": expansion.features,
+        "cost_usd": cost_usd,
+    }
+
+
+def save_json(record, name: str, data) -> Path:
+    path = Path(record.path) / name
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def save_plan(record, plan: Plan) -> Path:
     path = Path(record.path) / PLAN_FILE
     path.write_text(plan.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -298,15 +352,24 @@ def design(
     planner=make_plan,
     renderer=render_build,
     reviewer=run_review,
+    use_expand=True,
+    ask_user=True,
+    ask=input,
+    expand_model=DEFAULT_EXPAND_MODEL,
+    asker=ask_questions,
+    expander=expand,
 ) -> DesignResult:
-    """Plan, build and review a design, using only what is in the inventory file.
+    """Expand, plan, build and review a design, using only what is in the inventory file.
 
-    Flow: (Expand) -> Plan -> Build until the gate passes (max_retries retries) ->
+    Flow: Expand (questions, then a detailed description; skipped when
+    use_expand is False; defaults used without asking when ask_user is False)
+    -> Plan -> Build until the gate passes (max_retries retries) ->
     render -> Review. If review items fail, the builder runs again from that
     record with the failed items (max MAX_REVIEW_ROUNDS reviews). If that rebuild
     cannot pass the gate, the last build that passed it is kept.
 
-    Raises PlanError (carrying the planning cost) if no usable plan comes back.
+    Raises ExpandError or PlanError if no usable reply comes back; their
+    cost_usd is everything spent until then.
     """
     from brickwright.config import Config
     from brickwright.driver.loop import run_agent
@@ -323,15 +386,33 @@ def design(
         kwargs["records_dir"] = Path(records_dir)
     config = Config(**kwargs)
 
-    expansion: str | None = None  # set by the Expand step once it exists
+    expansion: Expansion | None = None
+    expansion_data: dict | None = None
     expand_cost = 0.0
-    planned: PlanResult = planner(request, inventory, model=plan_model)
+    if use_expand:
+        asked = asker(request, inventory, model=expand_model)
+        answers = collect_answers(asked.questions, ask, interactive=ask_user)
+        try:
+            expanded = expander(request, answers, inventory, model=expand_model)
+        except ExpandError as err:
+            raise ExpandError(str(err), asked.cost_usd + err.cost_usd, err.attempts) from None
+        expansion = expanded.expansion
+        expand_cost = asked.cost_usd + expanded.cost_usd
+        expansion_data = expansion_record(request, answers, expansion, expand_cost)
+
+    try:
+        planned: PlanResult = planner(request, inventory, model=plan_model, expansion=expansion)
+    except PlanError as err:
+        raise PlanError(str(err), expand_cost + err.cost_usd, err.attempts) from None
     plan = planned.plan
     prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan))
+    expansion_text = expansion.as_text() if expansion is not None else None
 
     def new_record(record_prompt: str, from_id: str | None = None):
         rec = Record.create(config, prompt=record_prompt, from_id=from_id)
         save_plan(rec, plan)
+        if expansion_data is not None:
+            save_json(rec, EXPANSION_FILE, expansion_data)
         return rec
 
     build_cost, rounds = 0.0, 0
@@ -367,7 +448,7 @@ def design(
             warn(f"review skipped: {why}")
             break
         try:
-            result = reviewer(plan, expansion, image, model=review_model)
+            result = reviewer(plan, expansion_text, image, model=review_model)
         except ReviewError as err:
             review_cost += err.cost_usd
             note, review_passed = str(err), None
@@ -449,6 +530,16 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--max-cost", type=float, default=0.5, help="USD cap per build round")
     parser.add_argument("--max-retries", type=int, default=2)
+    parser.add_argument(
+        "--no-questions",
+        action="store_true",
+        help="do not ask questions; use the default answers",
+    )
+    parser.add_argument(
+        "--no-expand",
+        action="store_true",
+        help="skip the questions and the detailed description; plan from the short request",
+    )
     args = parser.parse_args(argv)
     if argv is None and os.name == "nt" and not sys.flags.utf8_mode:
         # BrickWright writes its transcript with the Windows default encoding,
@@ -470,10 +561,17 @@ def main(argv=None) -> int:
             plan_model=args.plan_model,
             max_cost=args.max_cost,
             max_retries=args.max_retries,
+            use_expand=not args.no_expand,
+            ask_user=not args.no_questions,
         )
+    except ExpandError as err:
+        print(f"Error: expanding the request failed. {err}", file=sys.stderr)
+        print("Run again with --no-expand to plan from the short request.", file=sys.stderr)
+        print(f"Cost so far: ${err.cost_usd:.3f}", file=sys.stderr)
+        return 1
     except PlanError as err:
         print(f"Error: planning failed. {err}", file=sys.stderr)
-        print(f"Cost: ${err.cost_usd:.3f} (plan, {err.attempts} call(s))", file=sys.stderr)
+        print(f"Cost so far: ${err.cost_usd:.3f}", file=sys.stderr)
         return 1
     print(f"\n{'PASSED' if result.ok else 'FAILED'} the inventory and step gate after {result.rounds} round(s).")
     if result.ok:

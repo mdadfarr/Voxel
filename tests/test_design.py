@@ -6,6 +6,7 @@ import bricklayer as bl
 import pytest
 
 from voxel import Inventory, design as dz
+from voxel.expand import ExpandError, Expansion, ExpansionResult, Question, QuestionsResult
 from voxel.plan import Plan, PlanError, PlanResult, spare_set
 from voxel.review import Review, ReviewError, ReviewResult, Verdict
 
@@ -123,11 +124,13 @@ TOWER_PLAN = {
 def fake_planner(cost=0.05):
     calls = []
 
-    def planner(request, inventory, *, model):
+    def planner(request, inventory, *, model, expansion=None):
         calls.append((request, model))
+        planner.expansions.append(expansion)
         return PlanResult(Plan.model_validate(TOWER_PLAN), cost, 1)
 
     planner.calls = calls
+    planner.expansions = []
     return planner
 
 
@@ -162,6 +165,7 @@ def fake_reviewer(outcomes, cost=0.03):
 def run_design(tmp_path, inv, run, **kwargs):
     kwargs.setdefault("planner", fake_planner())
     kwargs.setdefault("renderer", no_render)
+    kwargs.setdefault("use_expand", False)
     return dz.design("a tower", inv, records_dir=tmp_path / "rec", run=run, **kwargs)
 
 
@@ -342,7 +346,7 @@ def test_retry_prompt_repeats_plan_parts_and_report(tmp_path):
 
 
 def test_plan_error_propagates(tmp_path):
-    def failing(request, inventory, *, model):
+    def failing(request, inventory, *, model, expansion=None):
         raise PlanError("no plan", 0.07, 2)
 
     with pytest.raises(PlanError) as info:
@@ -383,3 +387,208 @@ def test_agent_import_line_works():
     from voxel import check_owned
 
     assert check_owned is dz.check_owned
+
+
+# --- Expand step ----------------------------------------------------------------
+
+COLOR_QUESTION = Question(
+    id="color", text="What color?", kind="color", options=["RED", "WHITE"], default="RED"
+)
+HEIGHT_QUESTION = Question(id="height", text="How tall?", kind="other", default="6 bricks")
+TOWER_EXPANSION = Expansion(
+    description="A tall red tower with a white top.",
+    size={"width": 4, "depth": 2, "height": 6},
+    features=["white top"],
+)
+
+
+def fake_asker(questions=(COLOR_QUESTION, HEIGHT_QUESTION), cost=0.02):
+    calls = []
+
+    def asker(request, inventory, *, model):
+        calls.append((request, model))
+        return QuestionsResult(list(questions), cost, 1)
+
+    asker.calls = calls
+    return asker
+
+
+def fake_expander(cost=0.04):
+    calls = []
+
+    def expander(request, answers, inventory, *, model):
+        calls.append(answers)
+        return ExpansionResult(TOWER_EXPANSION, cost, 1)
+
+    expander.calls = calls
+    return expander
+
+
+def fake_ask(*typed):
+    prompts = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        return typed[len(prompts) - 1]
+
+    ask.prompts = prompts
+    return ask
+
+
+def expand_design(tmp_path, **kwargs):
+    kwargs.setdefault("asker", fake_asker())
+    kwargs.setdefault("expander", fake_expander())
+    kwargs.setdefault("use_expand", True)
+    return run_design(tmp_path, make_inventory(tmp_path), fake_run_factory([2]), **kwargs)
+
+
+def test_default_answers_on_empty_input(tmp_path):
+    ask, expander, planner = fake_ask("", "  "), fake_expander(), fake_planner()
+    result = expand_design(tmp_path, ask=ask, expander=expander, planner=planner)
+    assert ask.prompts == ["What color? (RED, WHITE) [RED] ", "How tall? [6 bricks] "]
+    [answers] = expander.calls
+    assert [(a.value, a.typed) for a in answers] == [("RED", False), ("6 bricks", False)]
+    assert planner.expansions == [TOWER_EXPANSION]
+    saved = json.loads((tmp_path / "rec" / result.record_id / dz.EXPANSION_FILE).read_text())
+    assert saved["request"] == "a tower"
+    assert [q["id"] for q in saved["questions"]] == ["color", "height"]
+    assert saved["answers"][0] == {"id": "color", "question": "What color?", "answer": "RED", "typed": False}
+    assert saved["description"] == "A tall red tower with a white top."
+    assert saved["size"] == {"width": 4, "depth": 2, "height": 6, "height_unit": "bricks (1 brick = 3 plates)"}
+    assert saved["features"] == ["white top"]
+    assert saved["cost_usd"] == pytest.approx(0.06)
+
+
+def test_typed_answers_are_used(tmp_path):
+    expander = fake_expander()
+    expand_design(tmp_path, ask=fake_ask("WHITE", "10 bricks"), expander=expander)
+    [answers] = expander.calls
+    assert [(a.value, a.typed) for a in answers] == [("WHITE", True), ("10 bricks", True)]
+
+
+def test_end_of_input_uses_the_default(tmp_path):
+    def closed(prompt):
+        raise EOFError
+
+    expander = fake_expander()
+    expand_design(tmp_path, ask=closed, expander=expander)
+    assert [a.value for a in expander.calls[0]] == ["RED", "6 bricks"]
+
+
+def test_no_questions_uses_defaults_without_asking(tmp_path, capsys):
+    def never(prompt):
+        raise AssertionError("must not ask")
+
+    asker, expander = fake_asker(), fake_expander()
+    expand_design(tmp_path, ask=never, ask_user=False, asker=asker, expander=expander)
+    assert len(asker.calls) == 1  # the questions call still gives the defaults
+    assert [(a.value, a.typed) for a in expander.calls[0]] == [("RED", False), ("6 bricks", False)]
+    out = capsys.readouterr().out
+    assert "What color? (RED, WHITE) [RED] (default)" in out
+
+
+def test_no_expand_skips_the_whole_step(tmp_path):
+    asker, expander, planner = fake_asker(), fake_expander(), fake_planner()
+    reviewer = fake_reviewer([[True, True]])
+    result = expand_design(
+        tmp_path,
+        use_expand=False,
+        asker=asker,
+        expander=expander,
+        planner=planner,
+        renderer=fake_renderer,
+        reviewer=reviewer,
+    )
+    assert asker.calls == [] and expander.calls == []
+    assert planner.expansions == [None]
+    assert reviewer.calls[0]["expansion"] is None
+    assert result.expand_cost_usd == 0.0
+    assert not (tmp_path / "rec" / result.record_id / dz.EXPANSION_FILE).exists()
+
+
+def test_expansion_goes_to_the_reviewer(tmp_path):
+    reviewer = fake_reviewer([[True, True]])
+    expand_design(tmp_path, ask=fake_ask("", ""), renderer=fake_renderer, reviewer=reviewer)
+    text = reviewer.calls[0]["expansion"]
+    assert text == TOWER_EXPANSION.as_text()
+    assert "4 x 2 studs, 6 bricks tall (1 brick = 3 plates)" in text
+
+
+def test_expand_cost_is_counted(tmp_path):
+    result = expand_design(
+        tmp_path,
+        ask=fake_ask("", ""),
+        asker=fake_asker(cost=0.02),
+        expander=fake_expander(cost=0.04),
+        planner=fake_planner(cost=0.05),
+    )
+    assert result.expand_cost_usd == pytest.approx(0.06)
+    assert result.cost_usd == pytest.approx(0.06 + 0.05 + 0.1)
+    assert dz.cost_line(result) == (
+        "Cost: $0.210 (expand $0.060 + plan $0.050 + build $0.100 + review $0.000)"
+    )
+
+
+def test_expansion_saved_in_retry_records(tmp_path):
+    run = fake_run_factory([3, 2])
+    run_design(
+        tmp_path,
+        make_inventory(tmp_path),
+        run,
+        use_expand=True,
+        ask=fake_ask("", ""),
+        asker=fake_asker(),
+        expander=fake_expander(),
+    )
+    for record_id in run.calls:
+        assert (tmp_path / "rec" / record_id / dz.EXPANSION_FILE).exists()
+
+
+def test_expand_error_carries_the_questions_cost(tmp_path):
+    def broken(request, answers, inventory, *, model):
+        raise ExpandError("No usable description after 2 attempts.", 0.04, 2)
+
+    with pytest.raises(ExpandError) as info:
+        expand_design(tmp_path, ask=fake_ask("", ""), asker=fake_asker(cost=0.02), expander=broken)
+    assert info.value.cost_usd == pytest.approx(0.06)
+
+
+def test_plan_error_after_expand_carries_both_costs(tmp_path):
+    def failing(request, inventory, *, model, expansion=None):
+        raise PlanError("no plan", 0.07, 2)
+
+    with pytest.raises(PlanError) as info:
+        expand_design(tmp_path, ask=fake_ask("", ""), planner=failing)
+    assert info.value.cost_usd == pytest.approx(0.06 + 0.07)
+
+
+@pytest.mark.parametrize(
+    "flags, use_expand, ask_user",
+    [([], True, True), (["--no-questions"], True, False), (["--no-expand"], False, True)],
+)
+def test_main_flags(tmp_path, monkeypatch, flags, use_expand, ask_user):
+    monkeypatch.chdir(tmp_path)  # no .env here, so main does not load a real key
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    inv = make_inventory(tmp_path)
+    seen = {}
+
+    def fake_design(request, inventory, **kwargs):
+        seen.update(kwargs)
+        return dz.DesignResult(True, "rec", tmp_path / "build.py", 1, "ok")
+
+    monkeypatch.setattr(dz, "design", fake_design)
+    assert dz.main(["a tower", "--inventory", str(inv), *flags]) == 0
+    assert seen["use_expand"] is use_expand and seen["ask_user"] is ask_user
+
+
+def test_main_reports_expand_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    def fake_design(request, inventory, **kwargs):
+        raise ExpandError("No usable questions after 2 attempts.", 0.04, 2)
+
+    monkeypatch.setattr(dz, "design", fake_design)
+    assert dz.main(["a tower", "--inventory", str(make_inventory(tmp_path))]) == 1
+    err = capsys.readouterr().err
+    assert "--no-expand" in err and "Cost so far: $0.040" in err

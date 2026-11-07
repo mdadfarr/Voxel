@@ -15,13 +15,16 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import bricklayer as bl
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .inventory import Inventory, PartKey, color_name, key_label
 from .llm import default_complete, response_cost, response_text, strip_fences
+
+if TYPE_CHECKING:
+    from .expand import Expansion
 
 DEFAULT_PLAN_MODEL = "claude-opus-5-5"
 MAX_TOKENS = 8192
@@ -196,7 +199,23 @@ EXAMPLE = {
 }
 
 
-def plan_prompt(request: str, inventory: Inventory) -> str:
+def expansion_rules(expansion: Expansion) -> str:
+    """What the planner must take from the detailed description."""
+    s = expansion.size
+    features = "\n".join(f"{n}. {f}" for n, f in enumerate(expansion.features, start=2))
+    return (
+        f"Detailed description (follow it):\n{expansion.as_text()}\n\n"
+        "Rules from the description:\n"
+        f"- Follow its overall size and the proportions between the parts. It is {s.width} "
+        f"studs wide, {s.depth} studs deep and {s.height} BRICKS tall; one brick is 3 plates, "
+        f"so that is {s.height * 3} plates in this plan's height units.\n"
+        "- Each key feature must become its own checklist item, right after the first "
+        "(\"looks like ...\") item, in this order:\n"
+        f"{features}\n\n"
+    )
+
+
+def plan_prompt(request: str, inventory: Inventory, expansion: Expansion | None = None) -> str:
     lines = [
         f"{part_id} | {part_name(part_id)} | {color_name(code)} | {n}"
         for (part_id, code), n in sorted(inventory.counts.items())
@@ -205,7 +224,8 @@ def plan_prompt(request: str, inventory: Inventory) -> str:
     return (
         "You plan LEGO builds. A separate builder will follow your plan, so be concrete.\n\n"
         f"Request: {request}\n\n"
-        "Reply with ONE JSON object and nothing else, with these keys:\n"
+        + (expansion_rules(expansion) if expansion is not None else "")
+        + "Reply with ONE JSON object and nothing else, with these keys:\n"
         "- checklist: yes/no questions to judge the finished build. The FIRST item is "
         'always "looks like <the thing asked for>". Then one item for each detail the '
         "request names (colors, parts of the object).\n"
@@ -222,7 +242,7 @@ def plan_prompt(request: str, inventory: Inventory) -> str:
     )
 
 
-def parse_plan(text: str, inventory: Inventory) -> Plan:
+def parse_plan(text: str, inventory: Inventory, expansion: Expansion | None = None) -> Plan:
     """Parse and check a plan. Raises ValueError with a message meant for the planner."""
     try:
         data = json.loads(strip_fences(text))
@@ -232,6 +252,13 @@ def parse_plan(text: str, inventory: Inventory) -> Plan:
         plan = Plan.model_validate(data)
     except ValidationError as err:
         raise ValueError(f"the JSON does not match the plan shape:\n{err}") from None
+    if expansion is not None:
+        needed = 1 + len(expansion.features)
+        if len(plan.checklist) < needed:
+            raise ValueError(
+                f"the checklist has {len(plan.checklist)} items but needs at least {needed}: "
+                f'"looks like ..." plus one item per key feature ({len(expansion.features)} features)'
+            )
     errors = plan_errors(plan, inventory)
     if errors:
         raise ValueError("the plan uses parts you do not own:\n" + "\n".join(f"- {e}" for e in errors))
@@ -242,19 +269,24 @@ def make_plan(
     request: str,
     inventory: Inventory,
     *,
+    expansion: Expansion | None = None,
     model: str = DEFAULT_PLAN_MODEL,
     complete: Callable[..., Any] | None = None,
 ) -> PlanResult:
-    """Ask the model for a plan. Retries once with the error if the plan is unusable."""
+    """Ask the model for a plan. Retries once with the error if the plan is unusable.
+
+    With an expansion, the planner follows its description, size and proportions,
+    and turns each key feature into a checklist item.
+    """
     complete = complete or default_complete()
-    messages = [{"role": "user", "content": plan_prompt(request, inventory)}]
+    messages = [{"role": "user", "content": plan_prompt(request, inventory, expansion)}]
     cost, error = 0.0, ""
     for attempt in (1, 2):
         response = complete(model=model, messages=messages, max_tokens=MAX_TOKENS)
         cost += response_cost(response)
         text = response_text(response)
         try:
-            return PlanResult(parse_plan(text, inventory), cost, attempt)
+            return PlanResult(parse_plan(text, inventory, expansion), cost, attempt)
         except ValueError as err:
             error = str(err)
         messages += [
