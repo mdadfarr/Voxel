@@ -68,8 +68,10 @@ import bricklayer as bl
 def create_build():
     b = bl.LegoBuild()
     last = b.add(bl.Element("3001", bl.Color.RED))
+    b.add_step()
     for _ in range({n} - 1):
         last = b.stack(bl.Element("3001", bl.Color.RED), on=last)
+        b.add_step()
     return b
 """
 
@@ -185,6 +187,7 @@ def test_retry_prompt_repeats_plan_parts_and_report(tmp_path):
     assert "3001 | Brick 2 x 4 | RED | 2 | 2" in retry
     assert "3023 | Plate 1 x 2 | RED | 4" in retry
     assert "PREVIOUS ATTEMPT" in retry and "used 3, owned 2" in retry
+    assert "inventory and build steps" in retry and "at most 12 parts" in retry
     assert "PREVIOUS ATTEMPT" not in first
 
 
@@ -214,6 +217,16 @@ def test_prompt_with_plan_lists_only_planned_and_spare_parts():
     assert "3023 | Plate 1 x 2 | RED | 4" in text
     assert "3039" not in text and "BLUE" not in text
     assert "check_owned(tests)" in text and "ONLY" in text
+    assert "build.add_step() after each group of at most 12 parts" in text
+    assert "bottom-up" in text and "sub-models" in text
+    assert "plan's sections in order, bottom to top" in text
+
+
+def test_prompt_without_plan_has_steps_rules_but_no_plan_line():
+    text = dz.build_prompt("a tower", Inventory({("3001", RED.ldraw_id): 5}))
+    assert "build.add_step() after each group of at most 12 parts" in text
+    assert "bottom-up" in text and "sub-models" in text
+    assert "plan's sections" not in text
 
 
 def test_agent_import_line_works():

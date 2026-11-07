@@ -33,10 +33,12 @@ from pathlib import Path
 from .check import CheckResult, check_build
 from .inventory import Inventory, PartKey, color_label, color_name, load_inventory
 from .plan import DEFAULT_PLAN_MODEL, Plan, PlanError, PlanResult, make_plan, part_name, spare_set
+from .steps import MAX_STEP_PARTS, step_problems
 
 INVENTORY_ENV = "VOXEL_INVENTORY"
 REQUIRED_CHECKS_ENV = "BRICKWRIGHT_REQUIRED_CHECKS"  # read by brickwright's validation
 OWNED_CHECK = "voxel.design:check_owned"
+STEPS_CHECK = "voxel.steps:check_steps"
 DEFAULT_MODEL = "claude-haiku-5-5"  # the build model
 PLAN_FILE = "plan.json"
 GATE_TIMEOUT = 60.0
@@ -69,16 +71,31 @@ def check_owned(tests, inventory_path: str | Path | None = None) -> None:
 
 
 def require_owned_check() -> None:
-    """Make BrickWright run check_owned as a required check on every validate/finalize."""
+    """Make BrickWright run check_owned and check_steps as required checks on every
+    validate/finalize."""
     current = [t.strip() for t in os.environ.get(REQUIRED_CHECKS_ENV, "").split(",") if t.strip()]
-    if OWNED_CHECK not in current:
-        os.environ[REQUIRED_CHECKS_ENV] = ",".join([*current, OWNED_CHECK])
+    missing = [c for c in (OWNED_CHECK, STEPS_CHECK) if c not in current]
+    if missing:
+        os.environ[REQUIRED_CHECKS_ENV] = ",".join([*current, *missing])
 
 
 CHECK_OWNED_RULE = (
     "Your run_tests() must include `from voxel import check_owned` and a call "
     "`check_owned(tests)`. Do not remove, weaken or work around it."
 )
+
+
+def steps_rule(with_plan: bool) -> str:
+    """How to split the build into steps; Voxel's step check enforces this."""
+    rules = [
+        f"Call build.add_step() after each group of at most {MAX_STEP_PARTS} parts.",
+        "Add parts bottom-up, so every part sits on parts from earlier steps.",
+        "Place parts directly in the build. If you use sub-models, each must have at "
+        f"most {MAX_STEP_PARTS} parts, because steps can't split a sub-model.",
+    ]
+    if with_plan:
+        rules.append("Follow the plan's sections in order, bottom to top, as the step order.")
+    return "BUILD STEPS:\n" + "\n".join(f"- {r}" for r in rules)
 
 
 def build_prompt(
@@ -99,6 +116,8 @@ def build_prompt(
             "than the count given. Do not use any other part or color.\n"
             "Format: part id | name | color | count owned\n"
             + "\n".join(lines)
+            + "\n\n"
+            + steps_rule(with_plan=False)
             + "\n\n"
             + CHECK_OWNED_RULE
         )
@@ -126,6 +145,8 @@ def build_prompt(
         "(part id | name | color | owned):\n"
         + ("\n".join(spares) if spares else "(none)")
         + "\n\n"
+        + steps_rule(with_plan=True)
+        + "\n\n"
         + CHECK_OWNED_RULE
     )
 
@@ -134,18 +155,18 @@ def build_prompt(
 
 
 def _gate_worker(build_path: str, inventory_path: str):
-    """Runs in a child process. Returns a CheckResult, or an error string."""
+    """Runs in a child process. Returns (CheckResult, step problems), or an error string."""
     try:
         from brickwright.tools import build_execution
 
         build = build_execution.create_build(build_path)
-        return check_build(build, load_inventory(inventory_path))
+        return check_build(build, load_inventory(inventory_path)), step_problems(build)
     except BaseException:
         return traceback.format_exc()[-2000:]
 
 
 def final_gate(build_path: str | Path, inventory_path: str | Path) -> tuple[bool, str]:
-    """Check a finished build.py against the inventory. Returns (ok, report)."""
+    """Check a finished build.py against the inventory and its steps. Returns (ok, report)."""
     from brickwright.tools import build_execution
 
     try:
@@ -156,8 +177,15 @@ def final_gate(build_path: str | Path, inventory_path: str | Path) -> tuple[bool
         return False, f"Inventory gate could not run the build: {err}"
     if isinstance(outcome, str):
         return False, f"Inventory gate could not build build.py:\n{outcome}"
-    assert isinstance(outcome, CheckResult)
-    return outcome.ok, "Inventory check passed." if outcome.ok else outcome.report()
+    inventory_result, steps = outcome
+    assert isinstance(inventory_result, CheckResult)
+    ok = inventory_result.ok and not steps
+    if ok:
+        return True, "Inventory and step checks passed."
+    parts = [] if inventory_result.ok else [inventory_result.report()]
+    if steps:
+        parts.append("Step check failed:\n" + "\n".join(f"  - {p}" for p in steps))
+    return False, "\n".join(parts)
 
 
 def feedback_prompt(report: str, base_prompt: str) -> str:
@@ -166,10 +194,12 @@ def feedback_prompt(report: str, base_prompt: str) -> str:
     return (
         f"{base_prompt}\n\n"
         "PREVIOUS ATTEMPT: build.py already holds your earlier build, but it failed "
-        "Voxel's independent inventory check:\n"
+        "Voxel's independent checks (inventory and build steps):\n"
         f"{report}\n\n"
-        "Fix build.py so it uses only the parts and counts listed above, keep "
-        "check_owned(tests) in run_tests(), and keep following the plan."
+        "Fix build.py so it uses only the parts and counts listed above, and so every "
+        "build step (build.add_step()) stands on its own with at most "
+        f"{MAX_STEP_PARTS} parts. Keep check_owned(tests) in run_tests(), and keep "
+        "following the plan."
     )
 
 
@@ -292,7 +322,7 @@ def main(argv=None) -> int:
         print(f"Error: planning failed. {err}", file=sys.stderr)
         print(f"Cost: ${err.cost_usd:.3f} (plan, {err.attempts} call(s))", file=sys.stderr)
         return 1
-    print(f"\n{'PASSED' if result.ok else 'FAILED'} the inventory gate after {result.rounds} round(s).")
+    print(f"\n{'PASSED' if result.ok else 'FAILED'} the inventory and step gate after {result.rounds} round(s).")
     print(
         f"Cost: ${result.cost_usd:.3f} "
         f"(plan ${result.plan_cost_usd:.3f} + build ${result.build_cost_usd:.3f})"
