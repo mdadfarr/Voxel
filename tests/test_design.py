@@ -67,8 +67,10 @@ import bricklayer as bl
 def create_build():
     b = bl.LegoBuild()
     last = b.add(bl.Element("3001", bl.Color.RED))
+    b.add_step()
     for _ in range({n} - 1):
         last = b.stack(bl.Element("3001", bl.Color.RED), on=last)
+        b.add_step()
     return b
 """
 

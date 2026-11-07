@@ -28,10 +28,12 @@ import bricklayer as bl
 
 from .check import CheckResult, check_build
 from .inventory import Inventory, color_label, load_inventory
+from .steps import MAX_STEP_PARTS, step_problems
 
 INVENTORY_ENV = "VOXEL_INVENTORY"
 REQUIRED_CHECKS_ENV = "BRICKWRIGHT_REQUIRED_CHECKS"  # read by brickwright's validation
 OWNED_CHECK = "voxel.design:check_owned"
+STEPS_CHECK = "voxel.steps:check_steps"
 DEFAULT_MODEL = "claude-haiku-5-5"
 GATE_TIMEOUT = 60.0
 
@@ -63,10 +65,12 @@ def check_owned(tests, inventory_path: str | Path | None = None) -> None:
 
 
 def require_owned_check() -> None:
-    """Make BrickWright run check_owned as a required check on every validate/finalize."""
+    """Make BrickWright run check_owned and check_steps as required checks on every
+    validate/finalize."""
     current = [t.strip() for t in os.environ.get(REQUIRED_CHECKS_ENV, "").split(",") if t.strip()]
-    if OWNED_CHECK not in current:
-        os.environ[REQUIRED_CHECKS_ENV] = ",".join([*current, OWNED_CHECK])
+    missing = [c for c in (OWNED_CHECK, STEPS_CHECK) if c not in current]
+    if missing:
+        os.environ[REQUIRED_CHECKS_ENV] = ",".join([*current, *missing])
 
 
 def part_name(part_id: str) -> str:
@@ -96,18 +100,18 @@ def build_prompt(request: str, inventory: Inventory) -> str:
 
 
 def _gate_worker(build_path: str, inventory_path: str):
-    """Runs in a child process. Returns a CheckResult, or an error string."""
+    """Runs in a child process. Returns (CheckResult, step problems), or an error string."""
     try:
         from brickwright.tools import build_execution
 
         build = build_execution.create_build(build_path)
-        return check_build(build, load_inventory(inventory_path))
+        return check_build(build, load_inventory(inventory_path)), step_problems(build)
     except BaseException:
         return traceback.format_exc()[-2000:]
 
 
 def final_gate(build_path: str | Path, inventory_path: str | Path) -> tuple[bool, str]:
-    """Check a finished build.py against the inventory. Returns (ok, report)."""
+    """Check a finished build.py against the inventory and its steps. Returns (ok, report)."""
     from brickwright.tools import build_execution
 
     try:
@@ -118,16 +122,24 @@ def final_gate(build_path: str | Path, inventory_path: str | Path) -> tuple[bool
         return False, f"Inventory gate could not run the build: {err}"
     if isinstance(outcome, str):
         return False, f"Inventory gate could not build build.py:\n{outcome}"
-    assert isinstance(outcome, CheckResult)
-    return outcome.ok, "Inventory check passed." if outcome.ok else outcome.report()
+    inventory_result, steps = outcome
+    assert isinstance(inventory_result, CheckResult)
+    ok = inventory_result.ok and not steps
+    if ok:
+        return True, "Inventory and step checks passed."
+    parts = [] if inventory_result.ok else [inventory_result.report()]
+    if steps:
+        parts.append("Step check failed:\n" + "\n".join(f"  - {p}" for p in steps))
+    return False, "\n".join(parts)
 
 
 def feedback_prompt(report: str) -> str:
     return (
-        "Your build.py failed Voxel's independent inventory check:\n"
+        "Your build.py failed Voxel's independent checks:\n"
         f"{report}\n\n"
         "Fix build.py so it uses only the owned parts and counts from the original "
-        "list, keep check_owned(tests) in run_tests(), and keep the design."
+        "list, and so every build step (build.add_step()) stands on its own with at "
+        f"most {MAX_STEP_PARTS} parts. Keep check_owned(tests) in run_tests(), and keep the design."
     )
 
 
@@ -211,7 +223,7 @@ def main(argv=None) -> int:
         max_cost=args.max_cost,
         max_retries=args.max_retries,
     )
-    print(f"\n{'PASSED' if result.ok else 'FAILED'} the inventory gate after {result.rounds} round(s).")
+    print(f"\n{'PASSED' if result.ok else 'FAILED'} the inventory and step gate after {result.rounds} round(s).")
     print(f"Cost: ${result.cost_usd:.3f}")
     print(f"Build file: {result.build_path}")
     if not result.ok:
