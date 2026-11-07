@@ -33,6 +33,24 @@ Then:
 python -m voxel.design "a small red tower" --inventory inventory.json --max-cost 0.5
 ```
 
+Before the builder runs, one planning call turns the request into a plan: a
+checklist, the sections of the object (size, position, colors, parts) and the
+owned parts it needs. The plan is saved as `plan.json` in the record folder.
+The builder gets the plan, the planned parts and a spare set (owned basic
+bricks and plates in the plan's colors) instead of the full inventory. Retry
+rounds get all of that again, plus the gate report. The inventory checks still
+use the full inventory. The summary shows the total cost, split into plan and
+build.
+
+Flags:
+
+- `--plan-model`: model for the planning call (default `claude-opus-5-5`).
+- `--build-model`: model for the builder agent (default `claude-haiku-5-5`).
+  `--model` still works as another name for it.
+- `--max-cost`: USD cap per build round (default 0.5).
+- `--max-retries`: builder rounds after a failed gate (default 2).
+- `--inventory`: inventory file (default `inventory.json`).
+
 ## Get an inventory from set numbers
 
 Put your key in a `.env` file (it is ignored by git):
