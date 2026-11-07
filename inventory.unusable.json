@@ -1,26 +1,90 @@
 [
   {
-    "set_num": "10242-1",
-    "part_num": "16681",
-    "name": "Sticker Sheet 1 for Sets 10242-1, 10242-2",
+    "set_num": "75375-1",
+    "part_num": "66906",
+    "name": "Technic Pin with Friction Ridges Lengthwise and Towball - Round Pin Hole",
+    "color_name": "Red",
+    "quantity": 1,
+    "reason": "Rebrickable lists no LDraw id for this part"
+  },
+  {
+    "set_num": "21367-1",
+    "part_num": "51138",
+    "name": "Technic Plate Rotor 3 Blade with Smooth Ends, 6 Studs, 1 Bottom Ridge (Propeller)",
+    "color_name": "Light Bluish Gray",
+    "quantity": 3,
+    "reason": "Rebrickable lists no LDraw id for this part"
+  },
+  {
+    "set_num": "21367-1",
+    "part_num": "10116283",
+    "name": "Sticker Sheet for Set 21367-1",
     "color_name": "[No Color/Any Color]",
     "quantity": 1,
     "reason": "Rebrickable lists no LDraw id for this part; Rebrickable lists no LDraw color for this part"
   },
   {
-    "set_num": "10242-1",
-    "part_num": "15920",
-    "name": "Sticker Sheet 2 for Sets 10242-1, 10242-2",
-    "color_name": "[No Color/Any Color]",
+    "set_num": "21367-1",
+    "part_num": "117247pr0001",
+    "name": "Animal, Dog, Snowy with White Head, Retro Space Suit Print",
+    "color_name": "Orange",
     "quantity": 1,
-    "reason": "Rebrickable lists no LDraw id for this part; Rebrickable lists no LDraw color for this part"
+    "reason": "LDraw id 117247p01 is not in BrickLayer's catalog"
   },
   {
-    "set_num": "10242-1",
-    "part_num": "16280pr0001",
-    "name": "Blanket, Red Chequers Print (Picnic)",
+    "set_num": "21367-1",
+    "part_num": "7217",
+    "name": "Brick Curved 1 x 8 x 1 2/3",
+    "color_name": "Red",
+    "quantity": 6,
+    "reason": "LDraw id 7217 is not in BrickLayer's catalog"
+  },
+  {
+    "set_num": "21367-1",
+    "part_num": "7547",
+    "name": "Brick Curved 4 x 2 Double",
+    "color_name": "Red",
+    "quantity": 6,
+    "reason": "LDraw id 7547 is not in BrickLayer's catalog"
+  },
+  {
+    "set_num": "21367-1",
+    "part_num": "8097",
+    "name": "Cone Half 8 x 4 x 8 (Elliptic Paraboloid)",
+    "color_name": "Red",
+    "quantity": 2,
+    "reason": "LDraw id 8097 is not in BrickLayer's catalog"
+  },
+  {
+    "set_num": "21367-1",
+    "part_num": "7547",
+    "name": "Brick Curved 4 x 2 Double",
     "color_name": "White",
+    "quantity": 6,
+    "reason": "LDraw id 7547 is not in BrickLayer's catalog"
+  },
+  {
+    "set_num": "70905-1",
+    "part_num": "3062bpr0008",
+    "name": "Brick Round 1 x 1 with Yellow 'BAT MERCH' and Silver Screws Print",
+    "color_name": "Black",
     "quantity": 1,
-    "reason": "LDraw id 16280p01 is not in BrickLayer's catalog"
+    "reason": "Rebrickable lists no LDraw id for this part"
+  },
+  {
+    "set_num": "70905-1",
+    "part_num": "31472",
+    "name": "Sticker Sheet for Set 70905-1",
+    "color_name": "[No Color/Any Color]",
+    "quantity": 1,
+    "reason": "Rebrickable lists no LDraw id for this part; Rebrickable lists no LDraw color for this part"
+  },
+  {
+    "set_num": "70905-1",
+    "part_num": "28782",
+    "name": "Windscreen 6 x 6 x 2",
+    "color_name": "Trans-Yellow",
+    "quantity": 1,
+    "reason": "Rebrickable lists no LDraw id for this part"
   }
 ]

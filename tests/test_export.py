@@ -74,3 +74,21 @@ def test_export_file_and_command_line(tmp_path, capsys):
     broken.write_text("def create_build():\n    raise ValueError('boom')\n")
     assert ex.main([str(broken), "-o", str(tmp_path / "x.json")]) == 1
     assert "boom" in capsys.readouterr().err
+
+
+def test_bricks_carry_their_ldraw_placement():
+    first = ex.export_build(make_build())["bricks"][0]
+    assert first["file"] == "3001.dat"
+    assert first["ldraw_color"] == 4
+    assert len(first["matrix"]) == 12
+
+
+def test_bricks_cut_off_from_the_main_build_are_flagged():
+    build = bl.LegoBuild()
+    a = build.add(bl.Element("3001", bl.Color.RED))
+    build.stack(bl.Element("3001", bl.Color.RED), on=a)
+    build.add(bl.Element("3001", bl.Color.BLUE), position=(20, 0, 0))
+    flags = [b["flag"] for b in ex.export_build(build)["bricks"]]
+    assert flags.count("disconnected") >= 1
+    clean = [b["flag"] for b in ex.export_build(make_build())["bricks"]]
+    assert set(clean) == {""}

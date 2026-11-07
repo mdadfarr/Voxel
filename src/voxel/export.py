@@ -1,5 +1,8 @@
 """Turn a finished build into a plain JSON brick list for the viewer.
 
+Each brick also carries its LDraw colour code, 12-number matrix and part file
+(ldraw_color, matrix, file) so the viewer can draw the real part shape.
+
 The viewer plays the build back one layer at a time, so the list is ordered
 the way you would build it: bottom layer first, then front to back.
 
@@ -20,7 +23,7 @@ from pathlib import Path
 
 import bricklayer as bl
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 3
 LAYER_PRECISION = 3  # round heights so two bricks at the same level share a layer
 
 
@@ -35,10 +38,105 @@ def _round(values) -> list[float]:
     return [round(float(v), 4) for v in values]
 
 
+def _mat(tokens):
+    """LDraw line numbers -> (3x3 rotation rows, translation)."""
+    x, y, z, a, b, c, d, e, f, g, h, i = (float(v) for v in tokens)
+    return [[a, b, c], [d, e, f], [g, h, i]], [x, y, z]
+
+
+def _compose(parent, child):
+    (pr, pt), (cr, ct) = parent, child
+    rot = [[sum(pr[r][k] * cr[k][c] for k in range(3)) for c in range(3)] for r in range(3)]
+    trans = [sum(pr[r][k] * ct[k] for k in range(3)) + pt[r] for r in range(3)]
+    return rot, trans
+
+
+def _ldraw_leaves(text: str) -> list[dict]:
+    """Every part in an LDraw file, in order, with its world matrix and colour.
+
+    BrickLayer writes rotated groups as sub-files (0 FILE ...), so the lines
+    have to be walked through those, multiplying the matrices as we go.
+    """
+    blocks: dict[str, list[list[str]]] = {}
+    current = None
+    for raw in text.splitlines():
+        line = raw.split()
+        if len(line) >= 3 and line[0] == "0" and line[1] == "FILE":
+            current = raw.split(None, 2)[2].strip().lower()
+            blocks[current] = []
+        elif line and line[0] == "1" and len(line) >= 15 and current is not None:
+            blocks[current].append(line)
+    if "main.ldr" not in blocks:
+        blocks = {"main.ldr": [ln.split() for ln in text.splitlines() if ln.startswith("1 ")]}
+    leaves: list[dict] = []
+    identity = ([[1, 0, 0], [0, 1, 0], [0, 0, 1]], [0, 0, 0])
+
+    def walk(name, world, color, depth=0):
+        if depth > 20:
+            return
+        for t in blocks[name]:
+            use = int(t[1]) if int(t[1]) != 16 else color
+            m = _compose(world, _mat(t[2:14]))
+            sub = t[14].lower()
+            if sub in blocks:
+                walk(sub, m, use, depth + 1)
+            else:
+                rot, tr = m
+                leaves.append(
+                    {
+                        "ldraw_color": use,
+                        "matrix": [round(v, 4) for v in tr + [v for row in rot for v in row]],
+                        "file": t[14],
+                    }
+                )
+
+    walk("main.ldr", identity, 16)
+    return leaves
+
+
+def _ldraw_lines(build, placements) -> list[dict | None]:
+    """The LDraw placement for each placement (same order), or None when they do not line up."""
+    empty = [None] * len(placements)
+    try:
+        leaves = _ldraw_leaves(bl.to_ldraw(build))
+    except Exception:
+        return empty
+    if len(leaves) != len(placements):
+        return empty
+    for leaf, placement in zip(leaves, placements):
+        if leaf["file"].lower() != f"{placement.content.ldraw_id}.dat".lower():
+            return empty
+    return leaves
+
+
+def _problem_flags(build, placements) -> list[str]:
+    """Which bricks are the problem: colliding, floating, or cut off from the main build."""
+    flags = [""] * len(placements)
+    where = {id(p): i for i, p in enumerate(placements)}
+    try:
+        parts = [p for p in build.connected_components]
+        if len(parts) > 1:
+            main = max(parts, key=len)
+            for comp in parts:
+                if comp is not main:
+                    for p in comp:
+                        flags[where[id(p)]] = "disconnected"
+        for p in build.floating_placements:
+            flags[where[id(p)]] = "floating"
+        for p in build.colliding_placements:
+            flags[where[id(p)]] = "colliding"
+    except Exception:
+        return [""] * len(placements)
+    return flags
+
+
 def export_build(build) -> dict:
     """The build as a JSON-ready dict: bricks in build order, layers, part counts."""
     rows = []
-    for placement in build.flattened_placements:
+    placements = list(build.flattened_placements)
+    ldraw = _ldraw_lines(build, placements)
+    flags = _problem_flags(build, placements)
+    for placement, extra, flag in zip(placements, ldraw, flags):
         low, high = placement.bounding_box
         element = placement.content
         color = element.color
@@ -51,6 +149,8 @@ def export_build(build) -> dict:
                 "finish": color.finish.name,
                 "min": _round(low.to_stud_units()),
                 "max": _round(high.to_stud_units()),
+                "flag": flag,
+                **(extra or {}),
             }
         )
 

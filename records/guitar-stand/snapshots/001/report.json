@@ -1,0 +1,10 @@
+{
+  "ok": false,
+  "source_sha256": "bddc860db684438b8cbc6b39e0dd384bbfd20eda9ac1cd0e67d8cf5a924e0e30",
+  "build_error": "Traceback (most recent call last):\n  File \"/Applications/github/brickwright/packages/brickwright/src/brickwright/tools/validation.py\", line 161, in build_and_validate\n    build = create()\n  File \"records/20261106-122418-an-electric-guitar-stand-670e75f0/build.py\", line 211, in create_build\n    guitar = build_guitar()\n  File \"records/20261106-122418-an-electric-guitar-stand-670e75f0/build.py\", line 166, in build_guitar\n    for s in split_run(l0, tile_inv):\n             ~~~~~~~~~^^^^^^^^^^^^^^\n  File \"records/20261106-122418-an-electric-guitar-stand-670e75f0/build.py\", line 62, in split_run\n    raise ValueError(f\"cannot split run {length} with {inv}\")\nValueError: cannot split run 2 with {8: 5, 4: 17, 3: 0, 1: 0}\n",
+  "error_type": "ValueError",
+  "checks": [],
+  "dimensions": null,
+  "brick_count": null,
+  "stdout": ""
+}

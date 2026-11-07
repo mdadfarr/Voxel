@@ -7,3 +7,4 @@ __pycache__/
 .cache/
 inventory.json
 inventory.unusable.jsonrecords/
+sounds/
