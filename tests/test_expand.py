@@ -193,7 +193,10 @@ def test_features_end_up_in_the_plan_prompt():
     assert "2. body outline with two cutaways\n3. white pickguard\n4. six tuning pegs" in prompt
     assert "Each key feature must become its own checklist item" in prompt
     assert "Follow its overall size and the proportions" in prompt
-    assert "30 BRICKS tall; one brick is 3 plates, so that is 90 plates" in prompt
+    assert "30 bricks tall, in the same units as this plan" in prompt
+    assert "z and height are in bricks (1 brick = 3 plates)" in prompt
+    assert "Use shaped parts (slopes, curved, round, tiles) for outlines and curves" in prompt
+    assert "plates in" not in prompt  # no plate conversion any more
 
 
 def test_plan_without_expansion_has_no_feature_rules():

@@ -8,16 +8,14 @@ malformed, the call is retried once with the error.
 
 from __future__ import annotations
 
-import base64
 import json
-import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import Field, ValidationError, field_validator
 
-from .llm import default_complete, response_cost, response_text, strip_fences
+from .llm import default_complete, image_part, response_cost, response_text, strip_fences
 from .plan import Plan, StrictModel
 
 DEFAULT_REVIEW_MODEL = "claude-opus-5-5"
@@ -106,13 +104,6 @@ def review_prompt(plan: Plan, expansion: str | None) -> str:
         "Reply with ONE JSON object and nothing else, in this shape (one verdict per item):\n"
         f"{json.dumps(shape, indent=2)}"
     )
-
-
-def image_part(image_path: str | Path) -> dict:
-    path = Path(image_path)
-    mime = mimetypes.guess_type(path.name)[0] or "image/png"
-    data = base64.b64encode(path.read_bytes()).decode("ascii")
-    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
 
 
 def parse_review(text: str, plan: Plan) -> Review:

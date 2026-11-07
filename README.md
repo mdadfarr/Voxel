@@ -57,19 +57,29 @@ color), not the full part list.
 
 Then one planning call turns the request into a plan: a
 checklist, the sections of the object (size, position, colors, parts) and the
-owned parts it needs. The plan is saved as `plan.json` in the record folder.
-The builder gets the plan, the planned parts and a spare set (owned basic
-bricks and plates in the plan's colors) instead of the full inventory. Retry
-rounds get all of that again, plus the gate report. The inventory checks still
-use the full inventory.
+owned parts it needs. The plan uses BrickLayer's units: x, y, width and depth
+in studs; z and height in bricks (1 brick = 3 plates, so a plate step is 1/3
+brick). The plan is saved as `plan.json` in the record folder. The builder gets
+the plan, the planned parts and a spare set instead of the full inventory. The
+spare set holds owned plain bricks and plates, slopes, curved and round parts
+and tiles in the plan's colors that the plan does not already use: at most 40
+rows, smallest parts first, shared out over the plan's colors (most-used color
+first). Retry rounds after a failed gate continue from the previous build and
+get all of that again, plus the gate report. The inventory checks still use the
+full inventory.
 
 After the build passes the gate, it is rendered and one review call (Opus,
 with the render attached) answers pass/fail with a short reason for each
 checklist item in the plan. The first item ("looks like ...") is judged from
-the image alone. If any item fails, the builder runs again from that build
-with the failed items and reasons (max 2 reviews). If that rebuild cannot pass
-the gate, the earlier build is kept. The reviews are saved as `review.json` in
-the record folder, one entry per round.
+the image alone. If any item fails, the plan is revised: one more Opus call sees
+the old plan, the failed items with their reasons and the render, and returns a
+new plan with the same checklist, checked like the first one. The builder then
+starts from an empty build with the new plan and the review's reasons (max 2
+reviews). If that rebuild cannot pass the gate, the earlier build is kept. The
+reviews are saved as `review.json` in the record folder, one entry per round.
+Each record has its plan version in `plan.json`; the final record also has
+`plans.json`, every plan version with why it was made. Plan revisions count
+under plan in the cost line.
 
 The summary shows the review result and the total cost:
 `Cost: $X (expand $a + plan $b + build $c + review $d)`. Expand is the cost of

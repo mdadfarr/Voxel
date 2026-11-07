@@ -16,7 +16,7 @@ INVENTORY = Inventory(
         ("3020", WHITE): 2,  # Plate 2 x 4 (planned)
         ("3023", RED): 4,  # Plate 1 x 2 -> spare
         ("3003", WHITE): 3,  # Brick 2 x 2 -> spare
-        ("3039", RED): 2,  # Slope, not basic -> not spare
+        ("3039", RED): 2,  # Slope in a plan color -> spare
         ("3001", BLUE): 6,  # basic, but the plan has no blue -> not spare
     }
 )
@@ -132,4 +132,147 @@ def test_more_than_owned_is_an_error():
 
 def test_spare_set_has_basic_parts_in_plan_colors():
     plan = pl.Plan.model_validate(VALID)
-    assert pl.spare_set(INVENTORY, plan) == {("3003", WHITE): 3, ("3023", RED): 4}
+    assert pl.spare_set(INVENTORY, plan) == {("3003", WHITE): 3, ("3023", RED): 4, ("3039", RED): 2}
+
+
+# --- Units: z and height in bricks ------------------------------------------------
+
+
+def with_section(**changes):
+    data = copy.deepcopy(VALID)
+    for key, value in changes.items():
+        data["sections"][0][key] = {**data["sections"][0][key], **value}
+    return data
+
+
+def test_z_and_height_are_bricks_with_thirds():
+    plan = pl.Plan.model_validate(with_section(size={"height": 2.333}, position={"z": 1 / 3}))
+    section = plan.sections[0]
+    assert section.size.height == 2.333 and section.position.z == 0.333
+    assert pl.Plan.model_validate(with_section(position={"z": 2.0})).sections[0].position.z == 2
+    with pytest.raises(ValueError, match="not a whole number of plates"):
+        pl.Plan.model_validate(with_section(position={"z": 0.5}))
+    assert "bricks (1 brick = 3 plates)" in pl.Position.model_fields["z"].description
+    assert "bricks (1 brick = 3 plates)" in pl.Size.model_fields["height"].description
+
+
+def test_units_and_shaped_parts_in_planner_prompt():
+    llm = FakeLLM(json.dumps(VALID))
+    pl.make_plan("an electric guitar", INVENTORY, complete=llm)
+    prompt = llm.calls[0]["messages"][0]["content"]
+    assert "z and height are in bricks (1 brick = 3 plates)" in prompt
+    assert "in plates" not in prompt
+    assert "Use shaped parts (slopes, curved, round, tiles) for outlines and curves" in prompt
+    assert "Follow the size and proportions in the description" in prompt
+
+
+# --- Spare set ------------------------------------------------------------------
+
+
+def test_spare_set_has_shaped_parts_in_plan_colors_only():
+    inv = Inventory(
+        {
+            ("3001", RED): 8,  # planned
+            ("3020", WHITE): 2,  # planned
+            ("3039", RED): 2,  # slope, plan color -> spare
+            ("3039", BLUE): 2,  # slope, other color -> left out
+            ("15068", WHITE): 3,  # curved -> spare
+            ("4073", RED): 5,  # round -> spare
+            ("3069b", WHITE): 4,  # tile -> spare
+            ("3062b", BLUE): 4,  # round, other color -> left out
+        }
+    )
+    spare = pl.spare_set(inv, pl.Plan.model_validate(VALID))
+    assert ("3039", RED) in spare and ("3039", BLUE) not in spare
+    assert {("15068", WHITE), ("4073", RED), ("3069b", WHITE)} <= set(spare)
+    assert ("3001", RED) not in spare and ("3062b", BLUE) not in spare
+
+
+BIG_IDS = (
+    "3001 3002 3003 3004 3005 3009 3010 3020 3021 3022 3023 3024 3031 3032 3034 3035 "
+    "3036 3460 3623 3666 3710 3795 3832 4477 3039 3040 3037 3038 3298 3069b 3070b "
+    "3068b 2431 15068 4073 3062b"
+).split()
+
+
+def test_spare_set_is_capped_at_40_rows():
+    inv = Inventory({**{(p, RED): 5 for p in BIG_IDS}, **{(p, WHITE): 5 for p in BIG_IDS}})
+    spare = pl.spare_set(inv, pl.Plan.model_validate(VALID))
+    assert len(spare) == pl.MAX_SPARE_ROWS == 40
+    assert len(BIG_IDS) * 2 - 2 > 40  # there were more candidates than the cap
+
+
+def test_spare_set_prefers_main_color_and_small_parts():
+    # The plan uses 4 red and 2 white pieces, so red comes first in each round.
+    inv = Inventory({**{(p, RED): 5 for p in BIG_IDS}, **{(p, WHITE): 5 for p in BIG_IDS}})
+    spare = list(pl.spare_set(inv, pl.Plan.model_validate(VALID), limit=4))
+    assert [code for _, code in spare] == [RED, WHITE, RED, WHITE]
+    sizes = {pl.part_name(part) for part, _ in spare}
+    assert sizes <= {"Brick 1 x 1", "Plate 1 x 1", "Tile 1 x 1 with Groove", "Plate 1 x 1 Round",
+                     "Brick 1 x 1 Round with Hollow Stud"}
+    big = pl.spare_set(inv, pl.Plan.model_validate(VALID))
+    assert ("3036", RED) not in big  # Plate 6 x 8 is cut first
+
+
+# --- Revising the plan after a failed review -------------------------------------
+
+REVIEW = SimpleNamespace(
+    verdicts=[
+        SimpleNamespace(index=1, item=VALID["checklist"][0], passed=False, reason="looks like a hammer"),
+        SimpleNamespace(index=2, item=VALID["checklist"][1], passed=True, reason="body is red"),
+        SimpleNamespace(index=3, item=VALID["checklist"][2], passed=True, reason="neck is white"),
+    ]
+)
+
+
+@pytest.fixture
+def image(tmp_path):
+    path = tmp_path / "build.png"
+    path.write_bytes(b"\x89PNG fake")
+    return path
+
+
+def revised_plan():
+    data = copy.deepcopy(VALID)
+    data["sections"][0]["size"] = {"width": 4, "depth": 2, "height": 1.333}
+    return data
+
+
+def test_revise_plan_sees_old_plan_review_and_image(image):
+    llm = FakeLLM(json.dumps(revised_plan()))
+    old = pl.Plan.model_validate(VALID)
+    result = pl.revise_plan(old, REVIEW, image, None, INVENTORY, complete=llm)
+    assert result.plan.sections[0].size.height == 1.333
+    assert result.cost_usd == pytest.approx(0.01) and result.attempts == 1
+    call = llm.calls[0]
+    assert call["model"] == "claude-opus-5-5"
+    text_part, picture = call["messages"][0]["content"]
+    text = text_part["text"]
+    assert "1. [FAIL] looks like an electric guitar: looks like a hammer" in text
+    assert "2. [pass] is the body red?: body is red" in text
+    assert '"name": "neck"' in text  # the old plan
+    assert "Keep the checklist EXACTLY the same" in text
+    assert "z and height are in bricks (1 brick = 3 plates)" in text
+    assert picture["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_revise_plan_rejects_changed_checklist_and_unowned_parts(image):
+    changed = revised_plan()
+    changed["checklist"] = changed["checklist"][:2]
+    llm = FakeLLM(json.dumps(changed), json.dumps(with_unowned_part()))
+    with pytest.raises(pl.PlanError) as info:
+        pl.revise_plan(pl.Plan.model_validate(VALID), REVIEW, image, None, INVENTORY, complete=llm)
+    assert info.value.cost_usd == pytest.approx(0.02)
+    assert "the checklist changed" in llm.calls[1]["messages"][2]["content"]
+
+
+def test_revise_plan_retries_then_passes(image):
+    llm = FakeLLM(json.dumps(with_unowned_part()), json.dumps(revised_plan()))
+    result = pl.revise_plan(pl.Plan.model_validate(VALID), REVIEW, image, None, INVENTORY, complete=llm)
+    assert result.attempts == 2
+    assert "do not own" in llm.calls[1]["messages"][2]["content"]
+
+
+def test_revise_plan_real_call_is_blocked(image):
+    with pytest.raises(AssertionError, match="pass a fake instead"):
+        pl.revise_plan(pl.Plan.model_validate(VALID), REVIEW, image, None, INVENTORY)

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import mimetypes
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -66,6 +69,14 @@ def call_with_retry(
             },
         ]
     raise ReplyError(f"No usable {what} after 2 attempts. Last error: {error}", cost, 2)
+
+
+def image_part(image_path: str | Path) -> dict:
+    """An image as a message content part (base64 data URL)."""
+    path = Path(image_path)
+    mime = mimetypes.guess_type(path.name)[0] or "image/png"
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
 
 
 def strip_fences(text: str) -> str:

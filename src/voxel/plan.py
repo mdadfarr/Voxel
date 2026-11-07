@@ -5,30 +5,40 @@ from the request, the sections of the object, and the parts it needs. The plan
 is checked against the inventory; if it is malformed or uses parts you do not
 own, the call is retried once with the error.
 
-The builder then gets the plan, the planned parts, and a "spare set" of basic
-bricks and plates in the plan's colors, so it has room to fix things.
+When the review fails, revise_plan() makes a new plan from the old one, the
+failed items and the render, checked the same way.
+
+Units match BrickLayer: x, y, width and depth in studs; z and height in bricks
+(1 brick = 3 plates), so a plate-thick step is 1/3 brick.
+
+The builder then gets the plan, the planned parts, and a "spare set" of small
+basic and shaped parts in the plan's colors, so it has room to fix things.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import bricklayer as bl
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .inventory import Inventory, PartKey, color_name, key_label
-from .llm import default_complete, response_cost, response_text, strip_fences
+from .llm import ReplyError, call_with_retry, default_complete, image_part, strip_fences
+from .parts import SPARE_KINDS, part_kind, part_name, part_size
 
 if TYPE_CHECKING:
     from .expand import Expansion
+    from .review import Review
 
 DEFAULT_PLAN_MODEL = "claude-opus-5-5"
 MAX_TOKENS = 8192
-BASIC_PART = re.compile(r"^(Brick|Plate) \d+ x \d+$")
+MAX_SPARE_ROWS = 40
+UNITS = "z and height are in bricks (1 brick = 3 plates)"
+UNITS_HINT = f"{UNITS}; a plate is 1/3 brick, so use whole numbers or .333 / .667"
 
 
 def parse_color(value: str) -> int:
@@ -42,11 +52,13 @@ def parse_color(value: str) -> int:
         raise ValueError(f"unknown color {value!r}") from None
 
 
-def part_name(part_id: str) -> str:
-    try:
-        return " ".join(bl.PartSpec(part_id).name.split())
-    except Exception:
-        return part_id
+def bricks(value: float) -> float:
+    """Check a z or height in bricks lands on whole plates; normalize thirds to 3 decimals."""
+    plates = value * 3
+    if abs(plates - round(plates)) > 0.02:
+        raise ValueError(f"{value} is not a whole number of plates ({UNITS_HINT})")
+    whole = round(plates)
+    return whole // 3 if whole % 3 == 0 else round(whole / 3, 3)
 
 
 # --- The plan's shape ---------------------------------------------------------
@@ -75,13 +87,23 @@ class PlanPart(StrictModel):
 class Size(StrictModel):
     width: int = Field(gt=0, description="studs, left to right")
     depth: int = Field(gt=0, description="studs, front to back")
-    height: int = Field(gt=0, description="plates (a brick is 3 plates)")
+    height: float = Field(gt=0, description="bricks (1 brick = 3 plates); thirds allowed")
+
+    @field_validator("height")
+    @classmethod
+    def _whole_plates(cls, value: float) -> float:
+        return bricks(value)
 
 
 class Position(StrictModel):
     x: int = Field(description="studs")
     y: int = Field(description="studs")
-    z: int = Field(description="plates above the ground")
+    z: float = Field(description="bricks (1 brick = 3 plates) above the ground; thirds allowed")
+
+    @field_validator("z")
+    @classmethod
+    def _whole_plates(cls, value: float) -> float:
+        return bricks(value)
 
 
 class Section(StrictModel):
@@ -134,6 +156,13 @@ class Plan(StrictModel):
         codes.update(parse_color(c) for s in self.sections for c in s.colors)
         return codes
 
+    def color_order(self) -> list[int]:
+        """The plan's colors, most-used first (by planned pieces)."""
+        used: Counter[int] = Counter()
+        for (_, code), n in self.part_counts().items():
+            used[code] += n
+        return sorted(self.color_codes(), key=lambda code: (-used[code], code))
+
 
 def plan_errors(plan: Plan, inventory: Inventory) -> list[str]:
     """Parts in the plan that are not owned, or not owned in that number."""
@@ -147,21 +176,33 @@ def plan_errors(plan: Plan, inventory: Inventory) -> list[str]:
     return errors
 
 
-def spare_set(inventory: Inventory, plan: Plan) -> dict[PartKey, int]:
-    """Owned basic bricks and plates in the plan's colors that the plan does not already use."""
-    colors = plan.color_codes()
+def spare_set(inventory: Inventory, plan: Plan, limit: int = MAX_SPARE_ROWS) -> dict[PartKey, int]:
+    """Owned spare parts in the plan's colors that the plan does not already use.
+
+    Spare kinds: plain bricks and plates, slopes, curved and round parts, tiles.
+    At most `limit` rows: taken round-robin over the plan's colors (most-used
+    color first), smallest parts first within each color.
+    """
     planned = plan.part_counts()
-    return {
-        key: n
-        for key, n in sorted(inventory.counts.items())
-        if n > 0
-        and key[1] in colors
-        and key not in planned
-        and BASIC_PART.match(part_name(key[0]))
-    }
+    colors = plan.color_order()
+    by_color: dict[int, list[tuple]] = {code: [] for code in colors}
+    for key, n in inventory.counts.items():
+        part_id, code = key
+        if n <= 0 or code not in by_color or key in planned:
+            continue
+        name = part_name(part_id)
+        if part_kind(name) in SPARE_KINDS:
+            by_color[code].append((*part_size(name), name, part_id, key))
+    queues = [sorted(by_color[code]) for code in colors]
+    picked: list[PartKey] = []
+    while len(picked) < limit and any(queues):
+        for queue in queues:
+            if queue and len(picked) < limit:
+                picked.append(queue.pop(0)[-1])
+    return {key: inventory.counts[key] for key in picked}
 
 
-# --- The planning call --------------------------------------------------------
+# --- The planning calls -------------------------------------------------------
 
 
 class PlanError(Exception):
@@ -189,7 +230,7 @@ EXAMPLE = {
     "sections": [
         {
             "name": "body",
-            "size": {"width": 4, "depth": 4, "height": 12},
+            "size": {"width": 4, "depth": 4, "height": 4},
             "position": {"x": 0, "y": 0, "z": 0},
             "colors": ["RED"],
             "parts": [{"part": "3001", "color": "RED", "count": 8}],
@@ -207,38 +248,49 @@ def expansion_rules(expansion: Expansion) -> str:
         f"Detailed description (follow it):\n{expansion.as_text()}\n\n"
         "Rules from the description:\n"
         f"- Follow its overall size and the proportions between the parts. It is {s.width} "
-        f"studs wide, {s.depth} studs deep and {s.height} BRICKS tall; one brick is 3 plates, "
-        f"so that is {s.height * 3} plates in this plan's height units.\n"
+        f"studs wide, {s.depth} studs deep and {s.height} bricks tall, in the same units "
+        "as this plan.\n"
         "- Each key feature must become its own checklist item, right after the first "
         "(\"looks like ...\") item, in this order:\n"
         f"{features}\n\n"
     )
 
 
-def plan_prompt(request: str, inventory: Inventory, expansion: Expansion | None = None) -> str:
+def plan_format_and_rules(inventory: Inventory) -> str:
+    """The reply format, rules and inventory, shared by make_plan and revise_plan."""
     lines = [
         f"{part_id} | {part_name(part_id)} | {color_name(code)} | {n}"
         for (part_id, code), n in sorted(inventory.counts.items())
         if n > 0
     ]
     return (
-        "You plan LEGO builds. A separate builder will follow your plan, so be concrete.\n\n"
-        f"Request: {request}\n\n"
-        + (expansion_rules(expansion) if expansion is not None else "")
-        + "Reply with ONE JSON object and nothing else, with these keys:\n"
+        "Reply with ONE JSON object and nothing else, with these keys:\n"
         "- checklist: yes/no questions to judge the finished build. The FIRST item is "
         'always "looks like <the thing asked for>". Then one item for each detail the '
         "request names (colors, parts of the object).\n"
         "- sections: the parts of the object (for a guitar: body, neck, headstock). Each has "
-        "name, size {width, depth in studs; height in plates, a brick is 3 plates}, "
-        "position {x, y in studs; z in plates above the ground}, colors, and the parts "
-        "it uses as {part, color, count}.\n"
+        "name, size {width, depth in studs; height in bricks}, position {x, y in studs; "
+        "z in bricks above the ground}, colors, and the parts it uses as {part, color, count}.\n"
         "- parts: every {part, color, count} the whole plan uses, totalled over all sections.\n\n"
         "Rules:\n"
+        f"- Units: x, y, width and depth are in studs; {UNITS_HINT}. This is the unit "
+        "BrickLayer's add() uses.\n"
         "- Use ONLY parts and colors from the inventory below, and never more than the count owned.\n"
-        "- Write colors exactly as in the inventory (like RED).\n\n"
+        "- Write colors exactly as in the inventory (like RED).\n"
+        "- Use shaped parts (slopes, curved, round, tiles) for outlines and curves, not only "
+        "plain bricks.\n"
+        "- Follow the size and proportions in the description, if one is given.\n\n"
         f"Example of the shape:\n{json.dumps(EXAMPLE, indent=2)}\n\n"
         "Inventory (part id | name | color | count owned):\n" + "\n".join(lines)
+    )
+
+
+def plan_prompt(request: str, inventory: Inventory, expansion: Expansion | None = None) -> str:
+    return (
+        "You plan LEGO builds. A separate builder will follow your plan, so be concrete.\n\n"
+        f"Request: {request}\n\n"
+        + (expansion_rules(expansion) if expansion is not None else "")
+        + plan_format_and_rules(inventory)
     )
 
 
@@ -265,6 +317,21 @@ def parse_plan(text: str, inventory: Inventory, expansion: Expansion | None = No
     return plan
 
 
+def _plan_call(complete, model, content, parse) -> PlanResult:
+    try:
+        plan, cost, attempts = call_with_retry(
+            complete or default_complete(),
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            parse=parse,
+            max_tokens=MAX_TOKENS,
+            what="plan",
+        )
+    except ReplyError as err:
+        raise PlanError(str(err), err.cost_usd, err.attempts) from None
+    return PlanResult(plan, cost, attempts)
+
+
 def make_plan(
     request: str,
     inventory: Inventory,
@@ -278,22 +345,65 @@ def make_plan(
     With an expansion, the planner follows its description, size and proportions,
     and turns each key feature into a checklist item.
     """
-    complete = complete or default_complete()
-    messages = [{"role": "user", "content": plan_prompt(request, inventory, expansion)}]
-    cost, error = 0.0, ""
-    for attempt in (1, 2):
-        response = complete(model=model, messages=messages, max_tokens=MAX_TOKENS)
-        cost += response_cost(response)
-        text = response_text(response)
-        try:
-            return PlanResult(parse_plan(text, inventory, expansion), cost, attempt)
-        except ValueError as err:
-            error = str(err)
-        messages += [
-            {"role": "assistant", "content": text or "(empty reply)"},
-            {
-                "role": "user",
-                "content": f"Your plan was rejected: {error}\n\nReply with the corrected JSON object only.",
-            },
-        ]
-    raise PlanError(f"No usable plan after 2 attempts. Last error: {error}", cost, 2)
+    return _plan_call(
+        complete,
+        model,
+        plan_prompt(request, inventory, expansion),
+        lambda text: parse_plan(text, inventory, expansion),
+    )
+
+
+def revise_prompt(old_plan: Plan, review: Review, expansion: Expansion | None, inventory: Inventory) -> str:
+    verdicts = "\n".join(
+        f"{v.index}. [{'pass' if v.passed else 'FAIL'}] {v.item}: {v.reason}" for v in review.verdicts
+    )
+    return (
+        "You plan LEGO builds. A builder built the plan below; the attached image is its "
+        "render (front, side, top and isometric views). A reviewer checked it against the "
+        "plan's checklist, and some items FAILED.\n\n"
+        "The plan itself is the likely cause. Revise the DESIGN so the failed items pass: "
+        "change sections, sizes, positions, proportions and parts as needed. Do not just "
+        "patch details. The builder will build your new plan from an empty build.\n\n"
+        f"Review:\n{verdicts}\n\n"
+        f"Old plan:\n{old_plan.model_dump_json(indent=2)}\n\n"
+        + (expansion_rules(expansion) if expansion is not None else "")
+        + "Keep the checklist EXACTLY the same: the same items, in the same order.\n\n"
+        + plan_format_and_rules(inventory)
+    )
+
+
+def parse_revision(
+    text: str, old_plan: Plan, inventory: Inventory, expansion: Expansion | None
+) -> Plan:
+    plan = parse_plan(text, inventory, expansion)
+    old = [item.strip() for item in old_plan.checklist]
+    if [item.strip() for item in plan.checklist] != old:
+        raise ValueError(
+            "the checklist changed; keep it exactly the same as the old plan's:\n"
+            + "\n".join(f"- {item}" for item in old_plan.checklist)
+        )
+    return plan
+
+
+def revise_plan(
+    old_plan: Plan,
+    review: Review,
+    image_path: str | Path,
+    expansion: Expansion | None,
+    inventory: Inventory,
+    *,
+    model: str = DEFAULT_PLAN_MODEL,
+    complete: Callable[..., Any] | None = None,
+) -> PlanResult:
+    """A new plan after a failed review, from the old plan, the review and the render.
+
+    Checked like make_plan (shape, owned parts, features), and the checklist must
+    stay the same. Retries once with the error if the plan is unusable.
+    """
+    content = [
+        {"type": "text", "text": revise_prompt(old_plan, review, expansion, inventory)},
+        image_part(image_path),
+    ]
+    return _plan_call(
+        complete, model, content, lambda text: parse_revision(text, old_plan, inventory, expansion)
+    )

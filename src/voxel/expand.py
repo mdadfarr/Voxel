@@ -26,30 +26,17 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 
 from .inventory import Inventory, color_name
 from .llm import ReplyError, call_with_retry, default_complete, strip_fences
-from .plan import StrictModel, part_name
+from .parts import SHAPES, part_name, shape_kind
+from .plan import StrictModel
 
 DEFAULT_EXPAND_MODEL = "claude-opus-5-5"
 MAX_QUESTIONS = 3
 MAX_FEATURES = 8
 MIN_COLOR_PIECES = 20  # a color is offered only if you own at least this many pieces of it
 MAX_TOKENS = 4096
-SHAPES = ("slope", "curved", "round")
 
 
 # --- Inventory summary --------------------------------------------------------
-
-
-def shape_kind(name: str) -> str | None:
-    """'slope', 'curved' or 'round' for a shaped part name, else None."""
-    if name.startswith(("Minifig", "Technic")):
-        return None
-    if "Curved" in name or name.startswith("Arch"):
-        return "curved"
-    if name.startswith(("Slope", "Wedge")):
-        return "slope"
-    if "Round" in name or name.startswith(("Dish", "Cone", "Dome")):
-        return "round"
-    return None
 
 
 @dataclass(frozen=True)

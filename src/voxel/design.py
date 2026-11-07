@@ -56,7 +56,17 @@ from .expand import (
     expand,
 )
 from .inventory import Inventory, PartKey, color_label, color_name, load_inventory
-from .plan import DEFAULT_PLAN_MODEL, Plan, PlanError, PlanResult, make_plan, part_name, spare_set
+from .parts import part_name
+from .plan import (
+    DEFAULT_PLAN_MODEL,
+    UNITS,
+    Plan,
+    PlanError,
+    PlanResult,
+    make_plan,
+    revise_plan,
+    spare_set,
+)
 from .review import DEFAULT_REVIEW_MODEL, Review, ReviewError, review_report
 from .review import review as run_review
 from .steps import MAX_STEP_PARTS, step_problems
@@ -67,6 +77,7 @@ OWNED_CHECK = "voxel.design:check_owned"
 STEPS_CHECK = "voxel.steps:check_steps"
 DEFAULT_MODEL = "claude-haiku-5-5"  # the build model
 PLAN_FILE = "plan.json"
+PLANS_FILE = "plans.json"  # every plan version, in the final record
 EXPANSION_FILE = "expansion.json"
 REVIEW_FILE = "review.json"
 MAX_REVIEW_ROUNDS = 2
@@ -162,8 +173,9 @@ def build_prompt(
     return (
         f"{request}\n\n"
         "Follow this plan. Its checklist is how the finished build will be judged; "
-        "its sections give each part of the object with size (studs; height in plates), "
-        "position and colors.\n"
+        "its sections give each part of the object with size, position and colors.\n"
+        f"Units: x, y, width and depth are in studs; {UNITS}, the same units as "
+        "BrickLayer's add() position (x, y, z). A plate-thick step is 1/3 brick.\n"
         f"PLAN:\n{plan.model_dump_json(indent=2)}\n\n"
         "HARD RULE: use ONLY the parts listed below (planned parts and spare parts), "
         "in those colors, and never more than the count owned. Do not use any other "
@@ -217,21 +229,34 @@ def final_gate(build_path: str | Path, inventory_path: str | Path) -> tuple[bool
     return False, "\n".join(parts)
 
 
-def feedback_prompt(problem: str, base_prompt: str) -> str:
+def feedback_prompt(problem: str, base_prompt: str, *, new_plan: bool = False) -> str:
     """Prompt for a retry round, after the gate or the review failed.
 
     A retry is a fresh conversation, so it repeats the full build prompt
     (request, plan, planned parts, spare set) first. `problem` says what failed:
     gate_problem(report) or review_problem(review).
+
+    new_plan: the plan above was revised after a failed review, and build.py
+    starts empty. Otherwise build.py holds the earlier build of the same plan.
     """
+    rules = (
+        "It must use only the parts and counts listed above, and every build step "
+        f"(build.add_step()) must stand on its own with at most {MAX_STEP_PARTS} parts. "
+        "Keep check_owned(tests) in run_tests()."
+    )
+    if new_plan:
+        return (
+            f"{base_prompt}\n\n"
+            f"PREVIOUS ATTEMPT: your earlier build {problem}\n\n"
+            "The plan above is a NEW plan, revised because of that review. build.py "
+            "starts empty: build the new plan from scratch, using the reasons above to "
+            f"avoid the same problems. {rules}"
+        )
     return (
         f"{base_prompt}\n\n"
         "PREVIOUS ATTEMPT: build.py already holds your earlier build, but it "
         f"{problem}\n\n"
-        "Fix these problems in build.py. It must still use only the parts and counts "
-        "listed above, and every build step (build.add_step()) must stand on its own "
-        f"with at most {MAX_STEP_PARTS} parts. Keep check_owned(tests) in run_tests(), "
-        "and keep following the plan."
+        f"Fix these problems in build.py. {rules} Keep following the plan."
     )
 
 
@@ -331,6 +356,17 @@ def save_json(record, name: str, data) -> Path:
     return path
 
 
+def plan_version(version: int, reason: str, plan: Plan, cost_usd: float) -> dict:
+    """One entry of plans.json. record_id is filled in by the first record built from it."""
+    return {
+        "version": version,
+        "reason": reason,
+        "record_id": None,
+        "cost_usd": cost_usd,
+        "plan": plan.model_dump(),
+    }
+
+
 def save_plan(record, plan: Plan) -> Path:
     path = Path(record.path) / PLAN_FILE
     path.write_text(plan.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -352,6 +388,7 @@ def design(
     planner=make_plan,
     renderer=render_build,
     reviewer=run_review,
+    reviser=revise_plan,
     use_expand=True,
     ask_user=True,
     ask=input,
@@ -363,10 +400,11 @@ def design(
 
     Flow: Expand (questions, then a detailed description; skipped when
     use_expand is False; defaults used without asking when ask_user is False)
-    -> Plan -> Build until the gate passes (max_retries retries) ->
-    render -> Review. If review items fail, the builder runs again from that
-    record with the failed items (max MAX_REVIEW_ROUNDS reviews). If that rebuild
-    cannot pass the gate, the last build that passed it is kept.
+    -> Plan -> Build until the gate passes (max_retries retries, each continuing
+    from the previous build) -> render -> Review. If review items fail, the plan
+    is revised (reviser) and the builder starts again from an empty build with
+    the new plan and the review's reasons (max MAX_REVIEW_ROUNDS reviews). If that
+    rebuild cannot pass the gate, the last build that passed it is kept.
 
     Raises ExpandError or PlanError if no usable reply comes back; their
     cost_usd is everything spent until then.
@@ -405,12 +443,17 @@ def design(
     except PlanError as err:
         raise PlanError(str(err), expand_cost + err.cost_usd, err.attempts) from None
     plan = planned.plan
+    plan_cost = planned.cost_usd
+    plans: list[dict] = [plan_version(1, "initial", plan, planned.cost_usd)]
     prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan))
     expansion_text = expansion.as_text() if expansion is not None else None
 
     def new_record(record_prompt: str, from_id: str | None = None):
         rec = Record.create(config, prompt=record_prompt, from_id=from_id)
+        if plans[-1]["record_id"] is None:
+            plans[-1]["record_id"] = rec.id  # the first record built from this version
         save_plan(rec, plan)
+        save_json(rec, PLANS_FILE, plans)
         if expansion_data is not None:
             save_json(rec, EXPANSION_FILE, expansion_data)
         return rec
@@ -470,7 +513,23 @@ def design(
         save_reviews(record, reviews)
         if review_passed or review_round == MAX_REVIEW_ROUNDS:
             break
-        record = new_record(feedback_prompt(review_problem(result.review), prompt), record.id)
+        try:
+            revised = reviser(plan, result.review, image, expansion, inventory, model=plan_model)
+        except PlanError as err:
+            plan_cost += err.cost_usd
+            note = f"plan revision failed, keeping {record.id}: {err}"
+            warn(note)
+            break
+        plan_cost += revised.cost_usd
+        plan = revised.plan
+        plans.append(
+            plan_version(len(plans) + 1, f"revised after review round {review_round}", plan, revised.cost_usd)
+        )
+        prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan))
+        # A new plan starts from an empty build, not from the shape it replaces.
+        record = new_record(feedback_prompt(review_problem(result.review), prompt, new_plan=True))
+
+    save_json(record, PLANS_FILE, plans)  # the full history, also when an earlier build was kept
 
     return DesignResult(
         ok=ok,
@@ -479,7 +538,7 @@ def design(
         rounds=rounds,
         report=report,
         expand_cost_usd=expand_cost,
-        plan_cost_usd=planned.cost_usd,
+        plan_cost_usd=plan_cost,
         build_cost_usd=build_cost,
         review_cost_usd=review_cost,
         review_passed=review_passed,

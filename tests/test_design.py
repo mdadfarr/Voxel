@@ -162,8 +162,34 @@ def fake_reviewer(outcomes, cost=0.03):
     return reviewer
 
 
+REVISED_PLAN = {
+    **TOWER_PLAN,
+    "sections": [
+        {
+            **TOWER_PLAN["sections"][0],
+            "name": "tower v2",
+            "size": {"width": 2, "depth": 2, "height": 2.333},
+        }
+    ],
+}
+
+
+def fake_reviser(cost=0.05, revised=REVISED_PLAN):
+    calls = []
+
+    def reviser(old_plan, review, image_path, expansion, inventory, *, model):
+        calls.append(
+            {"old": old_plan, "review": review, "image": Path(image_path), "expansion": expansion, "model": model}
+        )
+        return PlanResult(Plan.model_validate(revised), cost, 1)
+
+    reviser.calls = calls
+    return reviser
+
+
 def run_design(tmp_path, inv, run, **kwargs):
     kwargs.setdefault("planner", fake_planner())
+    kwargs.setdefault("reviser", fake_reviser())
     kwargs.setdefault("renderer", no_render)
     kwargs.setdefault("use_expand", False)
     return dz.design("a tower", inv, records_dir=tmp_path / "rec", run=run, **kwargs)
@@ -197,7 +223,7 @@ def test_review_fails_then_passes_in_round_2(tmp_path):
     first, second = run.calls
     assert result.record_id == second
     retry = record_prompt(tmp_path, second)
-    assert retry.startswith(record_prompt(tmp_path, first))  # full prompt with the plan
+    assert '"name": "tower v2"' in retry and '"name": "tower"' not in retry  # the NEW plan
     assert "failed the visual review" in retry
     assert "- looks like a tower: looks like a tower is not met" in retry
     assert "is it red?: " not in retry  # only failed items
@@ -248,16 +274,17 @@ def test_all_costs_are_counted(tmp_path):
         make_inventory(tmp_path),
         run,
         planner=fake_planner(cost=0.05),
+        reviser=fake_reviser(cost=0.04),
         renderer=fake_renderer,
         reviewer=reviewer,
     )
-    assert result.plan_cost_usd == pytest.approx(0.05)
+    assert result.plan_cost_usd == pytest.approx(0.09)  # plan 0.05 + revision 0.04
     assert result.build_cost_usd == pytest.approx(0.2)
     assert result.review_cost_usd == pytest.approx(0.06)
     assert result.expand_cost_usd == 0.0
-    assert result.cost_usd == pytest.approx(0.31)
+    assert result.cost_usd == pytest.approx(0.35)
     assert dz.cost_line(result) == (
-        "Cost: $0.310 (expand $0.000 + plan $0.050 + build $0.200 + review $0.060)"
+        "Cost: $0.350 (expand $0.000 + plan $0.090 + build $0.200 + review $0.060)"
     )
     assert [e["cost_usd"] for e in reviews_in(tmp_path, result.record_id)] == [0.03, 0.03]
 
@@ -359,7 +386,8 @@ def test_prompt_with_plan_lists_only_planned_and_spare_parts():
         {
             ("3001", RED.ldraw_id): 5,
             ("3023", RED.ldraw_id): 4,  # Plate 1 x 2: spare
-            ("3039", RED.ldraw_id): 2,  # slope: left out
+            ("3039", RED.ldraw_id): 2,  # slope in a plan color: spare
+            ("3039", bl.Color.BLUE.ldraw_id): 2,  # slope in another color: left out
             ("3001", bl.Color.BLUE.ldraw_id): 6,  # other color: left out
         }
     )
@@ -369,7 +397,8 @@ def test_prompt_with_plan_lists_only_planned_and_spare_parts():
     assert '"looks like a tower"' in text
     assert "3001 | Brick 2 x 4 | RED | 2 | 5" in text
     assert "3023 | Plate 1 x 2 | RED | 4" in text
-    assert "3039" not in text and "BLUE" not in text
+    assert "3039 | Slope Brick 45 2 x 2 | RED | 2" in text and "BLUE" not in text
+    assert "z and height are in bricks (1 brick = 3 plates)" in text
     assert "check_owned(tests)" in text and "ONLY" in text
     assert "build.add_step() after each group of at most 12 parts" in text
     assert "bottom-up" in text and "sub-models" in text
@@ -592,3 +621,116 @@ def test_main_reports_expand_error(tmp_path, monkeypatch, capsys):
     assert dz.main(["a tower", "--inventory", str(make_inventory(tmp_path))]) == 1
     err = capsys.readouterr().err
     assert "--no-expand" in err and "Cost so far: $0.040" in err
+
+
+# --- Re-plan after a failed review ----------------------------------------------
+
+
+def meta(tmp_path, record_id):
+    return json.loads((tmp_path / "rec" / record_id / "meta.json").read_text())
+
+
+def plans_in(tmp_path, record_id):
+    return json.loads((tmp_path / "rec" / record_id / dz.PLANS_FILE).read_text())
+
+
+def test_failed_review_revises_the_plan_and_rebuilds_from_empty(tmp_path):
+    run = fake_run_factory([2, 2])
+    reviewer = fake_reviewer([[False, True], [True, True]])
+    reviser = fake_reviser()
+    result = run_design(
+        tmp_path, make_inventory(tmp_path), run, renderer=fake_renderer, reviewer=reviewer, reviser=reviser
+    )
+    first, second = run.calls
+    [call] = reviser.calls
+    assert call["old"].sections[0].name == "tower"
+    assert [v.passed for v in call["review"].verdicts] == [False, True]
+    assert call["image"] == tmp_path / "rec" / first / "out" / "build.png"
+    assert call["expansion"] is None and call["model"] == "claude-opus-5-5"
+
+    retry = record_prompt(tmp_path, second)
+    assert '"name": "tower v2"' in retry and '"height": 2.333' in retry
+    assert "The plan above is a NEW plan" in retry and "build.py starts empty" in retry
+    assert "- looks like a tower: looks like a tower is not met" in retry
+    assert "Keep following the plan" not in retry and "already holds your earlier build" not in retry
+    assert meta(tmp_path, second)["forked_from"] is None  # empty build, not the old shape
+    # the second review judged the new plan
+    assert reviewer.calls[1]["image"].parent.parent.name == second
+    assert result.review_passed is True
+
+
+def test_plans_json_keeps_every_version(tmp_path):
+    run = fake_run_factory([2, 2])
+    result = run_design(
+        tmp_path,
+        make_inventory(tmp_path),
+        run,
+        renderer=fake_renderer,
+        reviewer=fake_reviewer([[False, True], [True, True]]),
+        reviser=fake_reviser(cost=0.04),
+    )
+    first, second = run.calls
+    history = plans_in(tmp_path, result.record_id)
+    assert [(p["version"], p["reason"], p["record_id"]) for p in history] == [
+        (1, "initial", first),
+        (2, "revised after review round 1", second),
+    ]
+    assert history[0]["plan"] == TOWER_PLAN
+    assert history[1]["plan"]["sections"][0]["name"] == "tower v2"
+    assert history[1]["cost_usd"] == 0.04
+    # each record's plan.json is its own version
+    assert json.loads((tmp_path / "rec" / first / dz.PLAN_FILE).read_text()) == TOWER_PLAN
+    assert json.loads((tmp_path / "rec" / second / dz.PLAN_FILE).read_text())["sections"][0]["name"] == "tower v2"
+
+
+def test_gate_retry_after_revision_continues_from_the_previous_build(tmp_path):
+    run = fake_run_factory([2, 3, 2])  # the rebuild of the new plan fails the gate once
+    result = run_design(
+        tmp_path,
+        make_inventory(tmp_path),
+        run,
+        renderer=fake_renderer,
+        reviewer=fake_reviewer([[False, True], [True, True]]),
+    )
+    first, rebuild, retry = run.calls
+    assert meta(tmp_path, rebuild)["forked_from"] is None
+    assert meta(tmp_path, retry)["forked_from"] == rebuild  # same plan version: continue
+    retry_prompt = record_prompt(tmp_path, retry)
+    assert '"name": "tower v2"' in retry_prompt and "Keep following the plan" in retry_prompt
+    assert "used 3, owned 2" in retry_prompt
+    assert result.ok and result.review_passed is True and result.record_id == retry
+    assert [p["record_id"] for p in plans_in(tmp_path, retry)] == [first, rebuild]
+
+
+def test_revision_failure_keeps_the_build_and_warns(tmp_path, capsys):
+    def broken(old_plan, review, image_path, expansion, inventory, *, model):
+        raise PlanError("No usable plan after 2 attempts.", 0.03, 2)
+
+    run = fake_run_factory([2])
+    result = run_design(
+        tmp_path,
+        make_inventory(tmp_path),
+        run,
+        planner=fake_planner(cost=0.05),
+        renderer=fake_renderer,
+        reviewer=fake_reviewer([[False, True]]),
+        reviser=broken,
+    )
+    assert result.ok and result.review_passed is False and result.record_id == run.calls[0]
+    assert result.plan_cost_usd == pytest.approx(0.08)
+    assert "plan revision failed" in capsys.readouterr().err
+    assert dz.exit_code(result) == 3
+
+
+def test_kept_build_still_gets_the_full_plan_history(tmp_path):
+    run = fake_run_factory([2, 3, 3, 3])  # the new plan's rebuild never passes the gate
+    result = run_design(
+        tmp_path,
+        make_inventory(tmp_path),
+        run,
+        renderer=fake_renderer,
+        reviewer=fake_reviewer([[False, True]]),
+        max_retries=2,
+    )
+    assert result.record_id == run.calls[0]
+    assert [p["version"] for p in plans_in(tmp_path, result.record_id)] == [1, 2]
