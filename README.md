@@ -21,11 +21,19 @@ Done so far:
 
 ## Design a build
 
-Put your Anthropic key in `.env` (ignored by git):
+Put your Anthropic key and the path to your LDraw parts library in `.env`
+(ignored by git):
 
 ```
 ANTHROPIC_API_KEY=your_key_here
+LDRAW_LIBRARY_PATH=/path/to/ldraw
 ```
+
+The review step needs an LDraw library to render the build. `LDRAW_LIBRARY_PATH`
+points to it; without it, a few standard places (like `~/ldraw`) are searched.
+If no library is found, the build is still made and checked, but the review is
+skipped with a warning. (`scripts/bw` sets the path for you;
+`python -m voxel.design` reads it from `.env` or your shell.)
 
 Then:
 
@@ -39,8 +47,23 @@ owned parts it needs. The plan is saved as `plan.json` in the record folder.
 The builder gets the plan, the planned parts and a spare set (owned basic
 bricks and plates in the plan's colors) instead of the full inventory. Retry
 rounds get all of that again, plus the gate report. The inventory checks still
-use the full inventory. The summary shows the total cost, split into plan and
-build.
+use the full inventory.
+
+After the build passes the gate, it is rendered and one review call (Opus,
+with the render attached) answers pass/fail with a short reason for each
+checklist item in the plan. The first item ("looks like ...") is judged from
+the image alone. If any item fails, the builder runs again from that build
+with the failed items and reasons (max 2 reviews). If that rebuild cannot pass
+the gate, the earlier build is kept. The reviews are saved as `review.json` in
+the record folder, one entry per round.
+
+The summary shows the review result and the total cost:
+`Cost: $X (expand $a + plan $b + build $c + review $d)`. Expand is a planned
+step that does not exist yet, so it is always $0.000 for now.
+
+Exit codes: 0 when the gate passed and the review passed or was skipped, 2 when
+the gate failed, 3 when the gate passed but the review still failed after 2
+rounds.
 
 Flags:
 

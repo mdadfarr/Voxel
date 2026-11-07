@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import bricklayer as bl
@@ -6,6 +7,7 @@ import pytest
 
 from voxel import Inventory, design as dz
 from voxel.plan import Plan, PlanError, PlanResult, spare_set
+from voxel.review import Review, ReviewError, ReviewResult, Verdict
 
 RED = bl.Color.RED
 
@@ -129,9 +131,157 @@ def fake_planner(cost=0.05):
     return planner
 
 
+def no_render(record, config):
+    return None, "no render in tests"
+
+
+def fake_renderer(record, config):
+    image = Path(record.out_dir) / "build.png"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"fake png")
+    return image, ""
+
+
+def fake_reviewer(outcomes, cost=0.03):
+    """Each call returns the next list of pass/fail values, one per checklist item."""
+    calls = []
+
+    def reviewer(plan, expansion, image_path, *, model):
+        calls.append({"expansion": expansion, "image": Path(image_path), "model": model})
+        passed = outcomes[len(calls) - 1]
+        verdicts = [
+            Verdict(index=n, item=item, passed=ok, reason="fine" if ok else f"{item} is not met")
+            for n, (item, ok) in enumerate(zip(plan.checklist, passed), start=1)
+        ]
+        return ReviewResult(Review(verdicts=verdicts), cost, 1)
+
+    reviewer.calls = calls
+    return reviewer
+
+
 def run_design(tmp_path, inv, run, **kwargs):
     kwargs.setdefault("planner", fake_planner())
+    kwargs.setdefault("renderer", no_render)
     return dz.design("a tower", inv, records_dir=tmp_path / "rec", run=run, **kwargs)
+
+
+def reviews_in(tmp_path, record_id):
+    return json.loads((tmp_path / "rec" / record_id / dz.REVIEW_FILE).read_text())
+
+
+def test_review_all_pass(tmp_path):
+    run = fake_run_factory([2])
+    reviewer = fake_reviewer([[True, True]])
+    result = run_design(tmp_path, make_inventory(tmp_path), run, renderer=fake_renderer, reviewer=reviewer)
+    assert result.ok and result.review_passed is True and result.review_rounds == 1
+    assert result.rounds == 1 and len(run.calls) == 1
+    assert reviewer.calls[0]["expansion"] is None
+    assert reviewer.calls[0]["model"] == "claude-opus-5-5"
+    assert reviewer.calls[0]["image"].name == "build.png"
+    [entry] = reviews_in(tmp_path, result.record_id)
+    assert entry["round"] == 1 and entry["passed"] is True and len(entry["verdicts"]) == 2
+    assert dz.review_line(result) == "Review: passed after 1 round(s)"
+    assert dz.exit_code(result) == 0
+
+
+def test_review_fails_then_passes_in_round_2(tmp_path):
+    run = fake_run_factory([2, 2])
+    reviewer = fake_reviewer([[False, True], [True, True]])
+    result = run_design(tmp_path, make_inventory(tmp_path), run, renderer=fake_renderer, reviewer=reviewer)
+    assert result.ok and result.review_passed is True and result.review_rounds == 2
+    assert result.rounds == 2
+    first, second = run.calls
+    assert result.record_id == second
+    retry = record_prompt(tmp_path, second)
+    assert retry.startswith(record_prompt(tmp_path, first))  # full prompt with the plan
+    assert "failed the visual review" in retry
+    assert "- looks like a tower: looks like a tower is not met" in retry
+    assert "is it red?: " not in retry  # only failed items
+    assert [e["round"] for e in reviews_in(tmp_path, second)] == [1, 2]
+    assert [e["passed"] for e in reviews_in(tmp_path, second)] == [False, True]
+    assert len(reviews_in(tmp_path, first)) == 1
+    assert (tmp_path / "rec" / second / dz.PLAN_FILE).exists()
+
+
+def test_review_still_failing_after_2_rounds(tmp_path):
+    run = fake_run_factory([2, 2, 2])
+    reviewer = fake_reviewer([[False, True], [False, True]])
+    result = run_design(tmp_path, make_inventory(tmp_path), run, renderer=fake_renderer, reviewer=reviewer)
+    assert result.ok and result.review_passed is False and result.review_rounds == 2
+    assert len(run.calls) == 2 and len(reviewer.calls) == 2  # no third, unreviewed build
+    assert "looks like a tower is not met" in result.review_report
+    assert dz.review_line(result).startswith("Review: FAILED after 2 round(s):")
+    assert dz.exit_code(result) == 3
+
+
+def test_no_render_skips_review_with_warning(tmp_path, capsys):
+    reviewer = fake_reviewer([])
+    renderer = lambda record, config: (None, "no LDraw library found (set LDRAW_LIBRARY_PATH in .env)")
+    result = run_design(
+        tmp_path, make_inventory(tmp_path), fake_run_factory([2]), renderer=renderer, reviewer=reviewer
+    )
+    assert result.ok and result.review_passed is None and result.review_rounds == 0
+    assert reviewer.calls == []
+    assert "Warning: review skipped: no LDraw library found" in capsys.readouterr().err
+    assert not (tmp_path / "rec" / result.record_id / dz.REVIEW_FILE).exists()
+    assert dz.review_line(result).startswith("Review: skipped (no LDraw library found")
+    assert dz.exit_code(result) == 0
+
+
+def test_render_build_reports_missing_ldraw(tmp_path, monkeypatch):
+    from brickwright.tools import rendering
+
+    monkeypatch.setattr(rendering, "render_available", lambda: False)
+    image, why = dz.render_build(None, None)
+    assert image is None and "no LDraw library" in why
+
+
+def test_all_costs_are_counted(tmp_path):
+    run = fake_run_factory([2, 2], costs=0.1)
+    reviewer = fake_reviewer([[False, True], [True, True]], cost=0.03)
+    result = run_design(
+        tmp_path,
+        make_inventory(tmp_path),
+        run,
+        planner=fake_planner(cost=0.05),
+        renderer=fake_renderer,
+        reviewer=reviewer,
+    )
+    assert result.plan_cost_usd == pytest.approx(0.05)
+    assert result.build_cost_usd == pytest.approx(0.2)
+    assert result.review_cost_usd == pytest.approx(0.06)
+    assert result.expand_cost_usd == 0.0
+    assert result.cost_usd == pytest.approx(0.31)
+    assert dz.cost_line(result) == (
+        "Cost: $0.310 (expand $0.000 + plan $0.050 + build $0.200 + review $0.060)"
+    )
+    assert [e["cost_usd"] for e in reviews_in(tmp_path, result.record_id)] == [0.03, 0.03]
+
+
+def test_reviewer_error_cost_counted_and_review_skipped(tmp_path, capsys):
+    def broken(plan, expansion, image_path, *, model):
+        raise ReviewError("No usable review after 2 attempts.", 0.04, 2)
+
+    result = run_design(
+        tmp_path, make_inventory(tmp_path), fake_run_factory([2]), renderer=fake_renderer, reviewer=broken
+    )
+    assert result.ok and result.review_passed is None
+    assert result.review_cost_usd == pytest.approx(0.04)
+    assert "Warning: review skipped: No usable review" in capsys.readouterr().err
+
+
+def test_rebuild_failing_gate_keeps_reviewed_build(tmp_path, capsys):
+    run = fake_run_factory([2, 3, 3, 3])  # the rebuild after the review never passes the gate
+    reviewer = fake_reviewer([[False, True]])
+    result = run_design(
+        tmp_path, make_inventory(tmp_path), run, renderer=fake_renderer, reviewer=reviewer, max_retries=2
+    )
+    assert result.ok and result.record_id == run.calls[0]
+    assert result.review_passed is False and result.review_rounds == 1
+    assert result.rounds == 4
+    assert "kept " + run.calls[0] in result.review_note
+    assert "kept" in capsys.readouterr().err
+    assert dz.exit_code(result) == 3
 
 
 def test_outer_loop_retries_then_passes(tmp_path):

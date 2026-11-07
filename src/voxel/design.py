@@ -6,6 +6,12 @@ The builder (Haiku by default) gets the plan, the planned parts and a spare set
 of basic bricks and plates, not the full inventory. The plan is saved as
 plan.json in the record folder.
 
+Last, once the build passes the gate, it is rendered and one review call
+(voxel.review, Opus) judges it against the plan's checklist. Failed items go
+back to the builder through the same retry path as the gate (max 2 reviews).
+Without an LDraw library there is no render, and the review is skipped with a
+warning. The reviews are saved as review.json in the record folder.
+
 Two layers keep the agent honest (both against the FULL inventory):
 
 1. Soft: the owned parts are listed in the prompt, and the agent's own
@@ -23,6 +29,7 @@ Run it:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -33,6 +40,8 @@ from pathlib import Path
 from .check import CheckResult, check_build
 from .inventory import Inventory, PartKey, color_label, color_name, load_inventory
 from .plan import DEFAULT_PLAN_MODEL, Plan, PlanError, PlanResult, make_plan, part_name, spare_set
+from .review import DEFAULT_REVIEW_MODEL, Review, ReviewError, review_report
+from .review import review as run_review
 from .steps import MAX_STEP_PARTS, step_problems
 
 INVENTORY_ENV = "VOXEL_INVENTORY"
@@ -41,6 +50,8 @@ OWNED_CHECK = "voxel.design:check_owned"
 STEPS_CHECK = "voxel.steps:check_steps"
 DEFAULT_MODEL = "claude-haiku-5-5"  # the build model
 PLAN_FILE = "plan.json"
+REVIEW_FILE = "review.json"
+MAX_REVIEW_ROUNDS = 2
 GATE_TIMEOUT = 60.0
 
 
@@ -188,19 +199,58 @@ def final_gate(build_path: str | Path, inventory_path: str | Path) -> tuple[bool
     return False, "\n".join(parts)
 
 
-def feedback_prompt(report: str, base_prompt: str) -> str:
-    """Prompt for a retry round. A retry is a fresh conversation, so it repeats
-    the full build prompt (request, plan, planned parts, spare set) first."""
+def feedback_prompt(problem: str, base_prompt: str) -> str:
+    """Prompt for a retry round, after the gate or the review failed.
+
+    A retry is a fresh conversation, so it repeats the full build prompt
+    (request, plan, planned parts, spare set) first. `problem` says what failed:
+    gate_problem(report) or review_problem(review).
+    """
     return (
         f"{base_prompt}\n\n"
-        "PREVIOUS ATTEMPT: build.py already holds your earlier build, but it failed "
-        "Voxel's independent checks (inventory and build steps):\n"
-        f"{report}\n\n"
-        "Fix build.py so it uses only the parts and counts listed above, and so every "
-        "build step (build.add_step()) stands on its own with at most "
-        f"{MAX_STEP_PARTS} parts. Keep check_owned(tests) in run_tests(), and keep "
-        "following the plan."
+        "PREVIOUS ATTEMPT: build.py already holds your earlier build, but it "
+        f"{problem}\n\n"
+        "Fix these problems in build.py. It must still use only the parts and counts "
+        "listed above, and every build step (build.add_step()) must stand on its own "
+        f"with at most {MAX_STEP_PARTS} parts. Keep check_owned(tests) in run_tests(), "
+        "and keep following the plan."
     )
+
+
+def gate_problem(report: str) -> str:
+    return f"failed Voxel's independent checks (inventory and build steps):\n{report}"
+
+
+def review_problem(result: Review) -> str:
+    return "failed the visual review. These checklist items failed:\n" + review_report(result)
+
+
+# --- Review: render the build and judge it against the checklist ---------------
+
+
+def render_build(record, config) -> tuple[Path | None, str]:
+    """Render the record's build to a PNG. Returns (image, "") or (None, why not)."""
+    try:
+        from brickwright.tools.rendering import render, render_available
+
+        if not render_available():
+            return None, "no LDraw library found (set LDRAW_LIBRARY_PATH in .env)"
+        report = render(record, config)
+    except Exception as err:
+        return None, f"render failed: {err}"
+    if not report.ok or report.image_path is None:
+        return None, f"render failed: {report.error}"
+    return Path(report.image_path), ""
+
+
+def warn(message: str) -> None:
+    print(f"Warning: {message}", file=sys.stderr)
+
+
+def save_reviews(record, reviews: list[dict]) -> Path:
+    path = Path(record.path) / REVIEW_FILE
+    path.write_text(json.dumps(reviews, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 # --- The outer loop -----------------------------------------------------------
@@ -208,17 +258,23 @@ def feedback_prompt(report: str, base_prompt: str) -> str:
 
 @dataclass(frozen=True)
 class DesignResult:
-    ok: bool
+    ok: bool  # the kept build passed the inventory and step gate
     record_id: str
     build_path: Path
-    rounds: int
-    cost_usd: float  # plan + build rounds
-    report: str
+    rounds: int  # builder runs, over all gate retries and review rounds
+    report: str  # the gate report
+    expand_cost_usd: float = 0.0
     plan_cost_usd: float = 0.0
+    build_cost_usd: float = 0.0
+    review_cost_usd: float = 0.0
+    review_passed: bool | None = None  # None: not reviewed (skipped, or the gate failed)
+    review_rounds: int = 0
+    review_report: str = ""  # failed items of the last review
+    review_note: str = ""  # why the review was skipped, or that an earlier build was kept
 
     @property
-    def build_cost_usd(self) -> float:
-        return self.cost_usd - self.plan_cost_usd
+    def cost_usd(self) -> float:
+        return self.expand_cost_usd + self.plan_cost_usd + self.build_cost_usd + self.review_cost_usd
 
 
 def save_plan(record, plan: Plan) -> Path:
@@ -233,14 +289,22 @@ def design(
     *,
     build_model=None,
     plan_model=DEFAULT_PLAN_MODEL,
+    review_model=DEFAULT_REVIEW_MODEL,
     max_cost=0.5,
     max_retries=2,
     records_dir=None,
     run=None,
     gate=final_gate,
     planner=make_plan,
+    renderer=render_build,
+    reviewer=run_review,
 ) -> DesignResult:
-    """Plan, then design a build from the request, using only what is in the inventory file.
+    """Plan, build and review a design, using only what is in the inventory file.
+
+    Flow: (Expand) -> Plan -> Build until the gate passes (max_retries retries) ->
+    render -> Review. If review items fail, the builder runs again from that
+    record with the failed items (max MAX_REVIEW_ROUNDS reviews). If that rebuild
+    cannot pass the gate, the last build that passed it is kept.
 
     Raises PlanError (carrying the planning cost) if no usable plan comes back.
     """
@@ -259,23 +323,112 @@ def design(
         kwargs["records_dir"] = Path(records_dir)
     config = Config(**kwargs)
 
+    expansion: str | None = None  # set by the Expand step once it exists
+    expand_cost = 0.0
     planned: PlanResult = planner(request, inventory, model=plan_model)
-    spare = spare_set(inventory, planned.plan)
-    prompt = build_prompt(request, inventory, planned.plan, spare)
-    record = Record.create(config, prompt=prompt)
-    save_plan(record, planned.plan)
-    cost, report, ok = planned.cost_usd, "", False
-    for round_no in range(1, max_retries + 2):
-        run_report = run(record, config)
-        cost += run_report.usage.cost_usd
-        ok, report = gate(record.build_path, inventory_path)
-        if ok or round_no > max_retries:
+    plan = planned.plan
+    prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan))
+
+    def new_record(record_prompt: str, from_id: str | None = None):
+        rec = Record.create(config, prompt=record_prompt, from_id=from_id)
+        save_plan(rec, plan)
+        return rec
+
+    build_cost, rounds = 0.0, 0
+
+    def build_until_gate(record):
+        nonlocal build_cost, rounds
+        for attempt in range(1, max_retries + 2):
+            build_cost += run(record, config).usage.cost_usd
+            rounds += 1
+            ok, report = gate(record.build_path, inventory_path)
+            if ok or attempt > max_retries:
+                return record, ok, report
+            record = new_record(feedback_prompt(gate_problem(report), prompt), record.id)
+
+    review_cost = 0.0
+    reviews: list[dict] = []
+    review_passed: bool | None = None
+    failed_text = note = ""
+    kept = None  # (record, report) of the last build that passed the gate
+    record = new_record(prompt)
+    for review_round in range(1, MAX_REVIEW_ROUNDS + 1):
+        record, ok, report = build_until_gate(record)
+        if not ok:
+            if kept is not None:
+                note = f"the rebuild after the review failed the gate ({record.id}); kept {kept[0].id}"
+                warn(note)
+                (record, report), ok = kept, True
             break
-        record = Record.create(config, prompt=feedback_prompt(report, prompt), from_id=record.id)
-        save_plan(record, planned.plan)
+        kept = (record, report)
+        image, why = renderer(record, config)
+        if image is None:
+            note, review_passed = why, None
+            warn(f"review skipped: {why}")
+            break
+        try:
+            result = reviewer(plan, expansion, image, model=review_model)
+        except ReviewError as err:
+            review_cost += err.cost_usd
+            note, review_passed = str(err), None
+            warn(f"review skipped: {err}")
+            break
+        review_cost += result.cost_usd
+        review_passed = result.review.passed
+        failed_text = review_report(result.review)
+        reviews.append(
+            {
+                "round": review_round,
+                "record_id": record.id,
+                "image": str(image),
+                "passed": review_passed,
+                "cost_usd": result.cost_usd,
+                "verdicts": [v.model_dump() for v in result.review.verdicts],
+            }
+        )
+        save_reviews(record, reviews)
+        if review_passed or review_round == MAX_REVIEW_ROUNDS:
+            break
+        record = new_record(feedback_prompt(review_problem(result.review), prompt), record.id)
+
     return DesignResult(
-        ok, record.id, Path(record.build_path), round_no, cost, report, planned.cost_usd
+        ok=ok,
+        record_id=record.id,
+        build_path=Path(record.build_path),
+        rounds=rounds,
+        report=report,
+        expand_cost_usd=expand_cost,
+        plan_cost_usd=planned.cost_usd,
+        build_cost_usd=build_cost,
+        review_cost_usd=review_cost,
+        review_passed=review_passed,
+        review_rounds=len(reviews),
+        review_report=failed_text if review_passed is False else "",
+        review_note=note,
     )
+
+
+def cost_line(result: DesignResult) -> str:
+    return (
+        f"Cost: ${result.cost_usd:.3f} (expand ${result.expand_cost_usd:.3f} + "
+        f"plan ${result.plan_cost_usd:.3f} + build ${result.build_cost_usd:.3f} + "
+        f"review ${result.review_cost_usd:.3f})"
+    )
+
+
+def review_line(result: DesignResult) -> str:
+    if result.review_passed is None:
+        return f"Review: skipped ({result.review_note})" if result.review_note else "Review: not run"
+    if result.review_passed:
+        return f"Review: passed after {result.review_rounds} round(s)"
+    return f"Review: FAILED after {result.review_rounds} round(s):\n{result.review_report}"
+
+
+def exit_code(result: DesignResult) -> int:
+    """0: gate passed and review passed or skipped. 2: gate failed. 3: review failed."""
+    if not result.ok:
+        return 2
+    return 3 if result.review_passed is False else 0
 
 
 def main(argv=None) -> int:
@@ -323,14 +476,15 @@ def main(argv=None) -> int:
         print(f"Cost: ${err.cost_usd:.3f} (plan, {err.attempts} call(s))", file=sys.stderr)
         return 1
     print(f"\n{'PASSED' if result.ok else 'FAILED'} the inventory and step gate after {result.rounds} round(s).")
-    print(
-        f"Cost: ${result.cost_usd:.3f} "
-        f"(plan ${result.plan_cost_usd:.3f} + build ${result.build_cost_usd:.3f})"
-    )
+    if result.ok:
+        print(review_line(result))
+        if result.review_passed is False and result.review_note:
+            print(f"Note: {result.review_note}")
+    print(cost_line(result))
     print(f"Build file: {result.build_path}")
     if not result.ok:
         print(result.report)
-    return 0 if result.ok else 2
+    return exit_code(result)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ import bricklayer as bl
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .inventory import Inventory, PartKey, color_name, key_label
+from .llm import default_complete, response_cost, response_text, strip_fences
 
 DEFAULT_PLAN_MODEL = "claude-opus-5-5"
 MAX_TOKENS = 8192
@@ -48,11 +49,11 @@ def part_name(part_id: str) -> str:
 # --- The plan's shape ---------------------------------------------------------
 
 
-class _Strict(BaseModel):
+class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class PlanPart(_Strict):
+class PlanPart(StrictModel):
     part: str
     color: str
     count: int = Field(gt=0)
@@ -68,19 +69,19 @@ class PlanPart(_Strict):
         return (self.part, parse_color(self.color))
 
 
-class Size(_Strict):
+class Size(StrictModel):
     width: int = Field(gt=0, description="studs, left to right")
     depth: int = Field(gt=0, description="studs, front to back")
     height: int = Field(gt=0, description="plates (a brick is 3 plates)")
 
 
-class Position(_Strict):
+class Position(StrictModel):
     x: int = Field(description="studs")
     y: int = Field(description="studs")
     z: int = Field(description="plates above the ground")
 
 
-class Section(_Strict):
+class Section(StrictModel):
     name: str
     size: Size
     position: Position
@@ -95,7 +96,7 @@ class Section(_Strict):
         return values
 
 
-class Plan(_Strict):
+class Plan(StrictModel):
     checklist: list[str] = Field(min_length=1)
     sections: list[Section] = Field(min_length=1)
     parts: list[PlanPart] = Field(min_length=1)
@@ -221,30 +222,10 @@ def plan_prompt(request: str, inventory: Inventory) -> str:
     )
 
 
-def _response_text(response: Any) -> str:
-    try:
-        return response.choices[0].message.content or ""
-    except (AttributeError, IndexError):
-        return ""
-
-
-def _response_cost(response: Any) -> float:
-    """litellm puts the call's cost on response._hidden_params['response_cost']."""
-    hidden = getattr(response, "_hidden_params", None) or {}
-    cost = hidden.get("response_cost") if isinstance(hidden, dict) else None
-    return float(cost) if isinstance(cost, (int, float)) and cost >= 0 else 0.0
-
-
-def _strip_fences(text: str) -> str:
-    text = text.strip()
-    match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
-    return match.group(1) if match else text
-
-
 def parse_plan(text: str, inventory: Inventory) -> Plan:
     """Parse and check a plan. Raises ValueError with a message meant for the planner."""
     try:
-        data = json.loads(_strip_fences(text))
+        data = json.loads(strip_fences(text))
     except json.JSONDecodeError as err:
         raise ValueError(f"the reply is not valid JSON: {err}") from None
     try:
@@ -265,16 +246,13 @@ def make_plan(
     complete: Callable[..., Any] | None = None,
 ) -> PlanResult:
     """Ask the model for a plan. Retries once with the error if the plan is unusable."""
-    if complete is None:
-        import litellm
-
-        complete = litellm.completion
+    complete = complete or default_complete()
     messages = [{"role": "user", "content": plan_prompt(request, inventory)}]
     cost, error = 0.0, ""
     for attempt in (1, 2):
         response = complete(model=model, messages=messages, max_tokens=MAX_TOKENS)
-        cost += _response_cost(response)
-        text = _response_text(response)
+        cost += response_cost(response)
+        text = response_text(response)
         try:
             return PlanResult(parse_plan(text, inventory), cost, attempt)
         except ValueError as err:
