@@ -83,7 +83,24 @@ under plan in the cost line.
 
 The summary shows the review result and the total cost:
 `Cost: $X (expand $a + plan $b + build $c + review $d)`. Expand is the cost of
-the questions and description calls ($0.000 with `--no-expand`).
+the questions and description calls ($0.000 with `--no-expand`). A second
+line splits it by model, with tokens:
+`Models: claude-opus-5-5 12,400 in / 3,100 out $0.310 | claude-haiku-5-5 990,000 in / 54,000 out $0.140`.
+The same numbers, plus which steps used each model, are saved as `usage.json`
+in the final record.
+
+To compare builder models on the exact same plan, reuse an earlier record:
+
+```powershell
+python -m voxel.design --from-record <record_id> --build-model claude-sonnet-5-5
+```
+
+This skips the questions, the description and the planning call (and their
+cost), and takes that record's `expansion.json` and the latest plan version
+from its `plans.json`. The request is taken from the record unless you give
+one. Build, gate, review and re-planning run as normal, in new records. The
+plan is checked against your current inventory first. Records made before
+`plans.json` existed have their plan in plates and cannot be reused.
 
 Exit codes: 0 when the gate passed and the review passed or was skipped, 2 when
 the gate failed, 3 when the gate passed but the review still failed after 2
@@ -100,7 +117,9 @@ Flags:
 - `--no-questions`: do not ask; use every question's default answer. The
   questions call still runs, to get the defaults.
 - `--no-expand`: skip the questions and the detailed description; plan from
-  the short request.
+  the short request. With `--from-record`, run without the saved expansion.
+- `--from-record <record_id>`: reuse that record's expansion and latest plan
+  instead of asking, expanding and planning again.
 
 ## Get an inventory from set numbers
 

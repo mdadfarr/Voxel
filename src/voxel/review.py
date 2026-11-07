@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from pydantic import Field, ValidationError, field_validator
 
-from .llm import default_complete, image_part, response_cost, response_text, strip_fences
+from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, image_part, strip_fences
 from .plan import Plan, StrictModel
 
 DEFAULT_REVIEW_MODEL = "claude-opus-5-5"
@@ -66,20 +66,17 @@ def review_report(review: Review) -> str:
     return "\n".join(f"- {v.item}: {v.reason}" for v in review.failed())
 
 
-class ReviewError(Exception):
+class ReviewError(StepError):
     """The reviewer did not produce a usable review, even after one retry."""
-
-    def __init__(self, message: str, cost_usd: float, attempts: int) -> None:
-        super().__init__(message)
-        self.cost_usd = cost_usd
-        self.attempts = attempts
 
 
 @dataclass(frozen=True)
-class ReviewResult:
+class ReviewResult(HasUsage):
     review: Review
     cost_usd: float
     attempts: int
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 def review_prompt(plan: Plan, expansion: str | None) -> str:
@@ -131,23 +128,16 @@ def review(
     complete: Callable[..., Any] | None = None,
 ) -> ReviewResult:
     """Judge the rendered build against the plan's checklist. Retries once if the reply is unusable."""
-    complete = complete or default_complete()
     content = [{"type": "text", "text": review_prompt(plan, expansion)}, image_part(image_path)]
-    messages: list[dict] = [{"role": "user", "content": content}]
-    cost, error = 0.0, ""
-    for attempt in (1, 2):
-        response = complete(model=model, messages=messages, max_tokens=MAX_TOKENS)
-        cost += response_cost(response)
-        text = response_text(response)
-        try:
-            return ReviewResult(parse_review(text, plan), cost, attempt)
-        except ValueError as err:
-            error = str(err)
-        messages += [
-            {"role": "assistant", "content": text or "(empty reply)"},
-            {
-                "role": "user",
-                "content": f"Your review was rejected: {error}\n\nReply with the corrected JSON object only.",
-            },
-        ]
-    raise ReviewError(f"No usable review after 2 attempts. Last error: {error}", cost, 2)
+    try:
+        result, usage, attempts = call_with_retry(
+            complete or default_complete(),
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            parse=lambda text: parse_review(text, plan),
+            max_tokens=MAX_TOKENS,
+            what="review",
+        )
+    except ReplyError as err:
+        raise ReviewError.from_reply(err) from None
+    return ReviewResult(result, usage.cost_usd, attempts, usage.input_tokens, usage.output_tokens)

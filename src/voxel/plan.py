@@ -27,7 +27,7 @@ import bricklayer as bl
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .inventory import Inventory, PartKey, color_name, key_label
-from .llm import ReplyError, call_with_retry, default_complete, image_part, strip_fences
+from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, image_part, strip_fences
 from .parts import SPARE_KINDS, part_kind, part_name, part_size
 
 if TYPE_CHECKING:
@@ -205,20 +205,17 @@ def spare_set(inventory: Inventory, plan: Plan, limit: int = MAX_SPARE_ROWS) -> 
 # --- The planning calls -------------------------------------------------------
 
 
-class PlanError(Exception):
+class PlanError(StepError):
     """The planner did not produce a usable plan, even after one retry."""
-
-    def __init__(self, message: str, cost_usd: float, attempts: int) -> None:
-        super().__init__(message)
-        self.cost_usd = cost_usd
-        self.attempts = attempts
 
 
 @dataclass(frozen=True)
-class PlanResult:
+class PlanResult(HasUsage):
     plan: Plan
     cost_usd: float
     attempts: int
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 EXAMPLE = {
@@ -319,7 +316,7 @@ def parse_plan(text: str, inventory: Inventory, expansion: Expansion | None = No
 
 def _plan_call(complete, model, content, parse) -> PlanResult:
     try:
-        plan, cost, attempts = call_with_retry(
+        plan, usage, attempts = call_with_retry(
             complete or default_complete(),
             model=model,
             messages=[{"role": "user", "content": content}],
@@ -328,8 +325,8 @@ def _plan_call(complete, model, content, parse) -> PlanResult:
             what="plan",
         )
     except ReplyError as err:
-        raise PlanError(str(err), err.cost_usd, err.attempts) from None
-    return PlanResult(plan, cost, attempts)
+        raise PlanError.from_reply(err) from None
+    return PlanResult(plan, usage.cost_usd, attempts, usage.input_tokens, usage.output_tokens)
 
 
 def make_plan(

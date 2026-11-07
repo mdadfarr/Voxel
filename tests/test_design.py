@@ -734,3 +734,241 @@ def test_kept_build_still_gets_the_full_plan_history(tmp_path):
     )
     assert result.record_id == run.calls[0]
     assert [p["version"] for p in plans_in(tmp_path, result.record_id)] == [1, 2]
+
+
+# --- --from-record ----------------------------------------------------------------
+
+
+def boom(*args, **kwargs):
+    raise AssertionError("must not be called with --from-record")
+
+
+def source_record(tmp_path):
+    """A finished run with an expansion, to reuse."""
+    return expand_design(tmp_path, ask=fake_ask("", "")).record_id
+
+
+def reuse(tmp_path, record_id, request="a tower", **kwargs):
+    kwargs.setdefault("asker", boom)
+    kwargs.setdefault("expander", boom)
+    kwargs.setdefault("planner", boom)
+    kwargs.setdefault("renderer", no_render)
+    kwargs.setdefault("reviser", fake_reviser())
+    kwargs.setdefault("use_expand", True)
+    run = kwargs.pop("run", None) or fake_run_factory([2, 2, 2])
+    result = dz.design(
+        request, make_inventory(tmp_path), records_dir=tmp_path / "rec", run=run, from_record=record_id, **kwargs
+    )
+    return result, run
+
+
+def test_from_record_skips_expand_and_plan(tmp_path):
+    src = source_record(tmp_path)
+    reviewer = fake_reviewer([[True, True]])
+    result, run = reuse(tmp_path, src, renderer=fake_renderer, reviewer=reviewer)
+    [new] = run.calls
+    assert new != src
+    prompt = record_prompt(tmp_path, new)
+    assert prompt.startswith("a tower") and '"name": "tower"' in prompt
+    assert result.expand_cost_usd == 0.0 and result.plan_cost_usd == 0.0
+    assert result.reused_from == f"plan v1 and expansion from {src}"
+    history = plans_in(tmp_path, new)
+    assert history[0]["reason"] == f"from record {src} (version 1)" and history[0]["cost_usd"] == 0.0
+    assert history[0]["plan"] == TOWER_PLAN
+    saved = json.loads((tmp_path / "rec" / new / dz.EXPANSION_FILE).read_text())
+    assert saved["from_record"] == src and saved["features"] == ["white top"]
+    assert reviewer.calls[0]["expansion"] == TOWER_EXPANSION.as_text()
+    assert [u["model"] for u in result.usage] == ["claude-haiku-5-5", "claude-opus-5-5"]  # build, review
+
+
+def test_from_record_uses_the_latest_plan_version(tmp_path):
+    src_run = fake_run_factory([2, 2])
+    src = run_design(
+        tmp_path,
+        make_inventory(tmp_path),
+        src_run,
+        renderer=fake_renderer,
+        reviewer=fake_reviewer([[False, True], [True, True]]),
+    ).record_id
+    result, run = reuse(tmp_path, src)
+    prompt = record_prompt(tmp_path, run.calls[0])
+    assert '"name": "tower v2"' in prompt and '"height": 2.333' in prompt
+    assert result.reused_from == f"plan v2 from {src}"  # that run had no expansion
+    assert plans_in(tmp_path, run.calls[0])[0]["reason"] == f"from record {src} (version 2)"
+
+
+def test_from_record_takes_the_saved_request(tmp_path, capsys):
+    src = source_record(tmp_path)
+    _, run = reuse(tmp_path, src, request="")
+    assert record_prompt(tmp_path, run.calls[0]).startswith("a tower\n\n")
+    _, run = reuse(tmp_path, src, request="a castle")
+    assert "differs from" in capsys.readouterr().err
+
+
+def test_from_record_with_no_expand_drops_the_expansion(tmp_path):
+    src = source_record(tmp_path)
+    reviewer = fake_reviewer([[True, True]])
+    result, run = reuse(tmp_path, src, use_expand=False, renderer=fake_renderer, reviewer=reviewer)
+    assert reviewer.calls[0]["expansion"] is None
+    assert not (tmp_path / "rec" / run.calls[0] / dz.EXPANSION_FILE).exists()
+    assert result.reused_from == f"plan v1 from {src}"
+
+
+def test_from_record_still_replans_after_a_failed_review(tmp_path):
+    src = source_record(tmp_path)
+    reviser = fake_reviser(cost=0.04)
+    result, run = reuse(
+        tmp_path, src, renderer=fake_renderer, reviewer=fake_reviewer([[False, True], [True, True]]), reviser=reviser
+    )
+    assert len(reviser.calls) == 1 and result.review_passed is True
+    assert result.plan_cost_usd == pytest.approx(0.04)
+    assert [p["version"] for p in plans_in(tmp_path, result.record_id)] == [1, 2]
+
+
+def write_record(tmp_path, record_id, files):
+    folder = tmp_path / "rec" / record_id
+    folder.mkdir(parents=True)
+    for name, content in files.items():
+        (folder / name).write_text(content if isinstance(content, str) else json.dumps(content))
+    return folder
+
+
+def version(plan):
+    return [{"version": 1, "reason": "initial", "record_id": "x", "cost_usd": 0.0, "plan": plan}]
+
+
+@pytest.mark.parametrize(
+    "files, message",
+    [
+        (None, "not found in"),
+        ({"plan.json": TOWER_PLAN}, "made before z and height moved from plates to bricks"),
+        ({"plans.json": "{not json"}, "plans.json could not be read"),
+        ({"plans.json": []}, "has no plan versions"),
+        ({"plans.json": version({"checklist": ["is it red?"]})}, "plan version 1 is not a valid plan"),
+        (
+            {"plans.json": version({**TOWER_PLAN, "parts": [{"part": "3001", "color": "RED", "count": 9}]})},
+            "uses parts not in your current inventory",
+        ),
+        (
+            {"plans.json": version(TOWER_PLAN), "expansion.json": {"request": "a tower"}},
+            "expansion.json is not a valid expansion",
+        ),
+    ],
+)
+def test_broken_record_gives_a_clear_error_before_any_call(tmp_path, files, message):
+    if files is not None:
+        write_record(tmp_path, "old", files)
+    with pytest.raises(dz.RecordError, match=message):
+        reuse(tmp_path, "old")  # asker, expander and planner would raise AssertionError
+
+
+def test_main_reports_a_bad_record(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("BRICKWRIGHT_RECORDS_DIR", str(tmp_path / "rec"))
+    inv = make_inventory(tmp_path)
+    assert dz.main(["--from-record", "nope", "--inventory", str(inv)]) == 1
+    err = capsys.readouterr().err
+    assert "Error: cannot reuse record nope:" in err and "not found" in err
+
+
+def test_main_needs_a_request_or_a_record(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        dz.main(["--inventory", str(make_inventory(tmp_path))])
+
+
+# --- Usage per model -----------------------------------------------------------
+
+
+def token_run(sizes, cost=0.1, tokens=(50_000, 2_000), known=True):
+    calls = []
+
+    def run(record, config):
+        record.write_build(BUILD_SRC.format(n=sizes[len(calls)]))
+        calls.append(record.id)
+        usage = SimpleNamespace(
+            cost_usd=cost if known else None,
+            known_cost_usd=cost,
+            prompt_tokens=tokens[0],
+            completion_tokens=tokens[1],
+        )
+        return SimpleNamespace(usage=usage)
+
+    run.calls = calls
+    return run
+
+
+def test_usage_per_model_adds_up_to_the_total(tmp_path):
+    def asker(request, inventory, *, model):
+        return QuestionsResult([COLOR_QUESTION], 0.02, 1, 1_000, 200)
+
+    def expander(request, answers, inventory, *, model):
+        return ExpansionResult(TOWER_EXPANSION, 0.04, 1, 2_000, 400)
+
+    def planner(request, inventory, *, model, expansion=None):
+        return PlanResult(Plan.model_validate(TOWER_PLAN), 0.05, 1, 3_000, 600)
+
+    def reviser(old_plan, review, image_path, expansion, inventory, *, model):
+        return PlanResult(Plan.model_validate(REVISED_PLAN), 0.03, 1, 1_500, 300)
+
+    reviews = iter([[False, True], [True, True]])
+
+    def reviewer(plan, expansion, image_path, *, model):
+        passed = next(reviews)
+        verdicts = [Verdict(index=n, item=i, passed=p, reason="r") for n, (i, p) in enumerate(zip(plan.checklist, passed), 1)]
+        return ReviewResult(Review(verdicts=verdicts), 0.01, 1, 800, 100)
+
+    run = token_run([2, 2])
+    result = run_design(
+        tmp_path,
+        make_inventory(tmp_path),
+        run,
+        use_expand=True,
+        ask=fake_ask(""),
+        asker=asker,
+        expander=expander,
+        planner=planner,
+        reviser=reviser,
+        reviewer=reviewer,
+        renderer=fake_renderer,
+        review_model="claude-sonnet-5-5",
+    )
+    rows = {u["model"]: u for u in result.usage}
+    assert list(rows) == ["claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"]
+    opus = rows["claude-opus-5-5"]
+    assert opus["input_tokens"] == 1_000 + 2_000 + 3_000 + 1_500
+    assert opus["output_tokens"] == 200 + 400 + 600 + 300
+    assert opus["cost_usd"] == pytest.approx(0.02 + 0.04 + 0.05 + 0.03)
+    assert opus["steps"] == ["questions", "expand", "plan", "revise"]
+    haiku = rows["claude-haiku-5-5"]
+    assert (haiku["input_tokens"], haiku["output_tokens"]) == (100_000, 4_000)
+    assert haiku["cost_usd"] == pytest.approx(0.2) and haiku["steps"] == ["build"]
+    assert rows["claude-sonnet-5-5"]["cost_usd"] == pytest.approx(0.02)
+    assert sum(u["cost_usd"] for u in result.usage) == pytest.approx(result.cost_usd)
+    assert result.cost_usd == pytest.approx(0.14 + 0.2 + 0.02)
+    assert dz.models_line(result) == (
+        "Models: claude-opus-5-5 7,500 in / 1,500 out $0.140 | "
+        "claude-haiku-5-5 100,000 in / 4,000 out $0.200 | "
+        "claude-sonnet-5-5 1,600 in / 200 out $0.020"
+    )
+    saved = json.loads((tmp_path / "rec" / result.record_id / dz.USAGE_FILE).read_text())
+    assert [m["model"] for m in saved["models"]] == list(rows)
+    assert saved["total_cost_usd"] == pytest.approx(result.cost_usd)
+    assert saved["reused_from"] is None
+
+
+def test_unknown_builder_cost_counts_the_known_part(tmp_path, capsys):
+    run = token_run([2], cost=0.02, known=False)
+    result = run_design(tmp_path, make_inventory(tmp_path), run)
+    assert result.build_cost_usd == pytest.approx(0.02)
+    assert "cost is a lower bound" in capsys.readouterr().err
+
+
+def test_failed_step_usage_is_counted(tmp_path):
+    def failing(request, inventory, *, model, expansion=None):
+        raise PlanError("no plan", 0.07, 2, 5_000, 900)
+
+    with pytest.raises(PlanError) as info:
+        expand_design(tmp_path, ask=fake_ask("", ""), planner=failing)
+    assert info.value.cost_usd == pytest.approx(0.06 + 0.07)  # expand + the failed plan calls

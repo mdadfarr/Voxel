@@ -25,7 +25,7 @@ from typing import Any, Callable, Literal
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from .inventory import Inventory, color_name
-from .llm import ReplyError, call_with_retry, default_complete, strip_fences
+from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, strip_fences
 from .parts import SHAPES, part_name, shape_kind
 from .plan import StrictModel
 
@@ -263,27 +263,26 @@ def parse_expansion(text: str) -> Expansion:
 # --- The calls ----------------------------------------------------------------
 
 
-class ExpandError(Exception):
+class ExpandError(StepError):
     """A question or expansion call did not give a usable reply, even after one retry."""
-
-    def __init__(self, message: str, cost_usd: float, attempts: int) -> None:
-        super().__init__(message)
-        self.cost_usd = cost_usd
-        self.attempts = attempts
 
 
 @dataclass(frozen=True)
-class QuestionsResult:
+class QuestionsResult(HasUsage):
     questions: list[Question]
     cost_usd: float
     attempts: int
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass(frozen=True)
-class ExpansionResult:
+class ExpansionResult(HasUsage):
     expansion: Expansion
     cost_usd: float
     attempts: int
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 def ask_questions(
@@ -295,7 +294,7 @@ def ask_questions(
 ) -> QuestionsResult:
     """At most 3 questions about what the request leaves open, each with a default."""
     try:
-        questions, cost, attempts = call_with_retry(
+        questions, usage, attempts = call_with_retry(
             complete or default_complete(),
             model=model,
             messages=[{"role": "user", "content": questions_prompt(request, inventory)}],
@@ -304,8 +303,8 @@ def ask_questions(
             what="questions",
         )
     except ReplyError as err:
-        raise ExpandError(str(err), err.cost_usd, err.attempts) from None
-    return QuestionsResult(questions, cost, attempts)
+        raise ExpandError.from_reply(err) from None
+    return QuestionsResult(questions, usage.cost_usd, attempts, usage.input_tokens, usage.output_tokens)
 
 
 def expand(
@@ -318,7 +317,7 @@ def expand(
 ) -> ExpansionResult:
     """The detailed description, with its size and key features."""
     try:
-        expansion, cost, attempts = call_with_retry(
+        expansion, usage, attempts = call_with_retry(
             complete or default_complete(),
             model=model,
             messages=[{"role": "user", "content": expand_prompt(request, answers, inventory)}],
@@ -327,5 +326,5 @@ def expand(
             what="description",
         )
     except ReplyError as err:
-        raise ExpandError(str(err), err.cost_usd, err.attempts) from None
-    return ExpansionResult(expansion, cost, attempts)
+        raise ExpandError.from_reply(err) from None
+    return ExpansionResult(expansion, usage.cost_usd, attempts, usage.input_tokens, usage.output_tokens)
