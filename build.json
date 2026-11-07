@@ -1,0 +1,497 @@
+{
+  "version": 1,
+  "units": "x and y in studs; z in stud units (brick body 1.2, plate 0.4)",
+  "size": [
+    6.0,
+    4.0,
+    4.4
+  ],
+  "bricks": [
+    {
+      "id": 1,
+      "layer": 1,
+      "part": "3009",
+      "name": "Brick 1 x 6",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "max": [
+        6.0,
+        1.0,
+        1.4
+      ]
+    },
+    {
+      "id": 2,
+      "layer": 1,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "max": [
+        1.0,
+        3.0,
+        1.4
+      ]
+    },
+    {
+      "id": 3,
+      "layer": 1,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        5.0,
+        1.0,
+        0.0
+      ],
+      "max": [
+        6.0,
+        3.0,
+        1.4
+      ]
+    },
+    {
+      "id": 4,
+      "layer": 1,
+      "part": "3009",
+      "name": "Brick 1 x 6",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        0.0,
+        3.0,
+        0.0
+      ],
+      "max": [
+        6.0,
+        4.0,
+        1.4
+      ]
+    },
+    {
+      "id": 5,
+      "layer": 2,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        0.0,
+        0.0,
+        1.2
+      ],
+      "max": [
+        1.0,
+        2.0,
+        2.6
+      ]
+    },
+    {
+      "id": 6,
+      "layer": 2,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        1.0,
+        0.0,
+        1.2
+      ],
+      "max": [
+        3.0,
+        1.0,
+        2.6
+      ]
+    },
+    {
+      "id": 7,
+      "layer": 2,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        3.0,
+        0.0,
+        1.2
+      ],
+      "max": [
+        5.0,
+        1.0,
+        2.6
+      ]
+    },
+    {
+      "id": 8,
+      "layer": 2,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        5.0,
+        0.0,
+        1.2
+      ],
+      "max": [
+        6.0,
+        2.0,
+        2.6
+      ]
+    },
+    {
+      "id": 9,
+      "layer": 2,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        0.0,
+        2.0,
+        1.2
+      ],
+      "max": [
+        1.0,
+        4.0,
+        2.6
+      ]
+    },
+    {
+      "id": 10,
+      "layer": 2,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        5.0,
+        2.0,
+        1.2
+      ],
+      "max": [
+        6.0,
+        4.0,
+        2.6
+      ]
+    },
+    {
+      "id": 11,
+      "layer": 2,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        1.0,
+        3.0,
+        1.2
+      ],
+      "max": [
+        3.0,
+        4.0,
+        2.6
+      ]
+    },
+    {
+      "id": 12,
+      "layer": 2,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        3.0,
+        3.0,
+        1.2
+      ],
+      "max": [
+        5.0,
+        4.0,
+        2.6
+      ]
+    },
+    {
+      "id": 13,
+      "layer": 3,
+      "part": "3009",
+      "name": "Brick 1 x 6",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        0.0,
+        0.0,
+        2.4
+      ],
+      "max": [
+        6.0,
+        1.0,
+        3.8
+      ]
+    },
+    {
+      "id": 14,
+      "layer": 3,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        0.0,
+        1.0,
+        2.4
+      ],
+      "max": [
+        1.0,
+        3.0,
+        3.8
+      ]
+    },
+    {
+      "id": 15,
+      "layer": 3,
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        5.0,
+        1.0,
+        2.4
+      ],
+      "max": [
+        6.0,
+        3.0,
+        3.8
+      ]
+    },
+    {
+      "id": 16,
+      "layer": 3,
+      "part": "3009",
+      "name": "Brick 1 x 6",
+      "color": "#582A12",
+      "color_name": "Reddish Brown",
+      "finish": "SOLID",
+      "min": [
+        0.0,
+        3.0,
+        2.4
+      ],
+      "max": [
+        6.0,
+        4.0,
+        3.8
+      ]
+    },
+    {
+      "id": 17,
+      "layer": 4,
+      "part": "15068",
+      "name": "Slope Brick Curved 2 x 2 x 0.667",
+      "color": "#FFFFFF",
+      "color_name": "White",
+      "finish": "SOLID",
+      "min": [
+        0.0,
+        0.0,
+        3.6
+      ],
+      "max": [
+        2.0,
+        2.0,
+        4.4
+      ]
+    },
+    {
+      "id": 18,
+      "layer": 4,
+      "part": "15068",
+      "name": "Slope Brick Curved 2 x 2 x 0.667",
+      "color": "#FFFFFF",
+      "color_name": "White",
+      "finish": "SOLID",
+      "min": [
+        2.0,
+        0.0,
+        3.6
+      ],
+      "max": [
+        4.0,
+        2.0,
+        4.4
+      ]
+    },
+    {
+      "id": 19,
+      "layer": 4,
+      "part": "15068",
+      "name": "Slope Brick Curved 2 x 2 x 0.667",
+      "color": "#FFFFFF",
+      "color_name": "White",
+      "finish": "SOLID",
+      "min": [
+        4.0,
+        0.0,
+        3.6
+      ],
+      "max": [
+        6.0,
+        2.0,
+        4.4
+      ]
+    },
+    {
+      "id": 20,
+      "layer": 4,
+      "part": "15068",
+      "name": "Slope Brick Curved 2 x 2 x 0.667",
+      "color": "#FFFFFF",
+      "color_name": "White",
+      "finish": "SOLID",
+      "min": [
+        0.0,
+        2.0,
+        3.6
+      ],
+      "max": [
+        2.0,
+        4.0,
+        4.4
+      ]
+    },
+    {
+      "id": 21,
+      "layer": 4,
+      "part": "15068",
+      "name": "Slope Brick Curved 2 x 2 x 0.667",
+      "color": "#FFFFFF",
+      "color_name": "White",
+      "finish": "SOLID",
+      "min": [
+        2.0,
+        2.0,
+        3.6
+      ],
+      "max": [
+        4.0,
+        4.0,
+        4.4
+      ]
+    },
+    {
+      "id": 22,
+      "layer": 4,
+      "part": "15068",
+      "name": "Slope Brick Curved 2 x 2 x 0.667",
+      "color": "#FFFFFF",
+      "color_name": "White",
+      "finish": "SOLID",
+      "min": [
+        4.0,
+        2.0,
+        3.6
+      ],
+      "max": [
+        6.0,
+        4.0,
+        4.4
+      ]
+    }
+  ],
+  "layers": [
+    {
+      "layer": 1,
+      "z": 0.0,
+      "bricks": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "layer": 2,
+      "z": 1.2,
+      "bricks": [
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ]
+    },
+    {
+      "layer": 3,
+      "z": 2.4,
+      "bricks": [
+        13,
+        14,
+        15,
+        16
+      ]
+    },
+    {
+      "layer": 4,
+      "z": 3.6,
+      "bricks": [
+        17,
+        18,
+        19,
+        20,
+        21,
+        22
+      ]
+    }
+  ],
+  "parts": [
+    {
+      "part": "15068",
+      "name": "Slope Brick Curved 2 x 2 x 0.667",
+      "color_name": "White",
+      "count": 6
+    },
+    {
+      "part": "3004",
+      "name": "Brick 1 x 2",
+      "color_name": "Reddish Brown",
+      "count": 12
+    },
+    {
+      "part": "3009",
+      "name": "Brick 1 x 6",
+      "color_name": "Reddish Brown",
+      "count": 4
+    }
+  ]
+}
