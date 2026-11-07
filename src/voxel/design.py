@@ -4,8 +4,10 @@ Two layers keep the agent honest:
 
 1. Soft: the owned parts are listed in the prompt, and the agent's own
    run_tests() includes check_owned(tests), so it sees over-use as a test failure.
-2. Hard: after the agent finishes, Voxel runs the check again itself, outside
-   the agent's code. If it fails, the agent is run again from that build with
+2. Hard: check_owned is a required BrickWright check (BRICKWRIGHT_REQUIRED_CHECKS),
+   so validate/finalize fail and the agent cannot finalize a build that over-uses
+   parts. As a backstop, after the agent finishes Voxel runs the check again
+   itself (final_gate). If it fails, the agent is run again from that build with
    the report (up to max_retries times).
 
 Run it:
@@ -28,6 +30,8 @@ from .check import CheckResult, check_build
 from .inventory import Inventory, color_label, load_inventory
 
 INVENTORY_ENV = "VOXEL_INVENTORY"
+REQUIRED_CHECKS_ENV = "BRICKWRIGHT_REQUIRED_CHECKS"  # read by brickwright's validation
+OWNED_CHECK = "voxel.design:check_owned"
 DEFAULT_MODEL = "claude-haiku-5-5"
 GATE_TIMEOUT = 60.0
 
@@ -56,6 +60,13 @@ def check_owned(tests, inventory_path: str | Path | None = None) -> None:
         return
     result = check_build(tests.build, load_inventory(path))
     tests.check("only_owned_parts", result.ok, None if result.ok else result.report())
+
+
+def require_owned_check() -> None:
+    """Make BrickWright run check_owned as a required check on every validate/finalize."""
+    current = [t.strip() for t in os.environ.get(REQUIRED_CHECKS_ENV, "").split(",") if t.strip()]
+    if OWNED_CHECK not in current:
+        os.environ[REQUIRED_CHECKS_ENV] = ",".join([*current, OWNED_CHECK])
 
 
 def part_name(part_id: str) -> str:
@@ -153,6 +164,7 @@ def design(
     inventory_path = Path(inventory_path).resolve()
     inventory = load_inventory(inventory_path)
     os.environ[INVENTORY_ENV] = str(inventory_path)  # the agent's child processes inherit this
+    require_owned_check()
     model = model or os.environ.get("BRICKWRIGHT_GENERATION_MODEL") or DEFAULT_MODEL
     kwargs = {"model": model, "max_cost": max_cost}
     if records_dir is not None:
