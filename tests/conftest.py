@@ -11,3 +11,10 @@ def no_real_llm_calls(monkeypatch):
         raise AssertionError("a test tried to call litellm.completion; pass a fake instead")
 
     monkeypatch.setattr(litellm, "completion", blocked)
+
+
+@pytest.fixture(autouse=True)
+def expert_env_restored(monkeypatch):
+    """design() turns BrickWright's ask_expert on through the environment; undo it
+    after each test."""
+    monkeypatch.delenv("BRICKWRIGHT_EXPERT_CONTEXT", raising=False)

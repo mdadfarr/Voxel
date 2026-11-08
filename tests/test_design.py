@@ -284,7 +284,7 @@ def test_all_costs_are_counted(tmp_path):
     assert result.expand_cost_usd == 0.0
     assert result.cost_usd == pytest.approx(0.35)
     assert dz.cost_line(result) == (
-        "Cost: $0.350 (expand $0.000 + plan $0.090 + build $0.200 + review $0.060)"
+        "Cost: $0.350 (expand $0.000 + plan $0.090 + build $0.200 + expert $0.000 + review $0.060)"
     )
     assert [e["cost_usd"] for e in reviews_in(tmp_path, result.record_id)] == [0.03, 0.03]
 
@@ -552,7 +552,7 @@ def test_expand_cost_is_counted(tmp_path):
     assert result.expand_cost_usd == pytest.approx(0.06)
     assert result.cost_usd == pytest.approx(0.06 + 0.05 + 0.1)
     assert dz.cost_line(result) == (
-        "Cost: $0.210 (expand $0.060 + plan $0.050 + build $0.100 + review $0.000)"
+        "Cost: $0.210 (expand $0.060 + plan $0.050 + build $0.100 + expert $0.000 + review $0.000)"
     )
 
 
@@ -1272,7 +1272,7 @@ def test_three_review_timeouts_stop_cleanly_with_the_summary(tmp_path, monkeypat
         f"kept {run.calls[0]}."
     )
     assert "PASSED the gate" in out and "Review: skipped (the review call failed)" in out
-    assert "Cost: $0.150 (expand $0.000 + plan $0.050 + build $0.100 + review $0.000)" in out
+    assert "Cost: $0.150 (expand $0.000 + plan $0.050 + build $0.100 + expert $0.000 + review $0.000)" in out
     assert any(line.startswith("Models: ") for line in lines)
     assert "Budget: $0.150 of $1.50 used" in out and "Build file:" in out
     assert "Traceback" not in out

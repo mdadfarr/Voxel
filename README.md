@@ -77,6 +77,25 @@ after each page; the builder's own order is kept as `out/build.unordered.ldr`.
 The step check then runs on the computed order as a safety check. Parts that
 nothing holds up are sent back to the builder as a normal gate retry.
 
+When the builder's validate fails, it asks an expert instead of guessing:
+BrickWright's `ask_expert` tool (Voxel turns it on; `--no-expert` turns it off).
+The builder sends only its record ID and the failed check's name. Code builds a
+small packet: the check's detail, the problem parts (for `connected`, the parts
+outside the largest group, nearest first, at most 3), the nearest parts around
+them (10% of the build, at least 8) plus every part in the column below, down to
+the ground, the parts you have left, and the plan section the problem is in.
+Sonnet answers with exact edits ("remove ... at (x,y,z); add Red 3023 at
+(x,y,z)"), as structured output checked in code. Each problem gets its own
+conversation; the start of the prompt (instructions and your full parts list) is
+the same every time and cached. If the same check still fails after the edits,
+Sonnet is asked again in the same conversation (5 tries), then Opus takes over
+(at most 3 Opus rescues per run, then the builder is told to stop and report).
+Expert calls count in `--max-cost` (the tool refuses when too little is left)
+and have their own rows on the Models line and an `expert` part in the Cost
+line. Every call is saved in `expert.json` in the record. An expert call that
+still fails after the retries is answered with "The expert is unavailable right
+now; fix this yourself." and the build goes on; a credit error stops the run.
+
 After the build passes the gate, it is rendered and one review call (Opus,
 with the render attached) answers pass/fail with a short reason for each
 checklist item in the plan. The first item ("looks like ...") is judged from
@@ -91,7 +110,7 @@ Each record has its plan version in `plan.json`; the final record also has
 under plan in the cost line.
 
 The summary shows the review result and the total cost:
-`Cost: $X (expand $a + plan $b + build $c + review $d)`. Expand is the cost of
+`Cost: $X (expand $a + plan $b + build $c + expert $e + review $d)`. Expand is the cost of
 the questions and description calls ($0.000 with `--no-expand`). A second
 line splits it by model, with tokens:
 `Models: claude-opus-5-5 12,400 in / 3,100 out $0.310 | claude-haiku-5-5 990,000 in / 54,000 out $0.140`.
@@ -158,6 +177,7 @@ Flags:
   the short request. With `--from-record`, run without the saved expansion.
 - `--from-record <record_id>`: reuse that record's expansion and latest plan
   instead of asking, expanding and planning again.
+- `--no-expert`: do not offer the builder the `ask_expert` tool.
 
 ## Get an inventory from set numbers
 

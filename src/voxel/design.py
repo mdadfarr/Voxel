@@ -47,6 +47,12 @@ Calls time out after 180 s (360 s for plan and revise). A call that still fails,
 or a credit balance too low, stops the run cleanly: the last build that passed
 the gate is kept, the normal summary is printed, and the exit code is 5.
 
+The expert: design() turns on BrickWright's ask_expert tool (voxel.expert is its
+context hook). When the builder's validate fails, it asks the expert (Sonnet;
+Opus after 5 tries on one problem, at most 3 Opus rescues per run) and applies
+its edits. Their cost counts in the budget and has its own rows on the Models
+line; every call is saved in expert.json in the record. --no-expert turns it off.
+
 Run it:
     python -m voxel.design "a small red tower" --inventory inventory.json
 """
@@ -76,6 +82,7 @@ from .expand import (
     expand,
 )
 from .inventory import Inventory, PartKey, color_label, color_name, load_inventory
+from .expert import CONTEXT_HOOK, EXPERT_RULE, INVENTORY_ENV
 from .llm import DEFAULT_TIMEOUT, CallFailed, Usage, call_api
 from .parts import part_name
 from .plan import (
@@ -95,7 +102,6 @@ from .review import review as run_review
 from .sequence import sequence, stepped_build
 from .steps import step_problems
 
-INVENTORY_ENV = "VOXEL_INVENTORY"
 REQUIRED_CHECKS_ENV = "BRICKWRIGHT_REQUIRED_CHECKS"  # read by brickwright's validation
 OWNED_CHECK = "voxel.design:check_owned"
 OUT_DIR = "out"  # BrickWright's output folder in a record
@@ -111,6 +117,7 @@ STEP_GROUP = {  # usage step -> cost line part
     "plan": "plan",
     "revise": "plan",
     "build": "build",
+    "expert": "expert",
     "review": "review",
 }
 EXPANSION_FILE = "expansion.json"
@@ -150,6 +157,16 @@ def check_owned(tests, inventory_path: str | Path | None = None) -> None:
     tests.check("only_owned_parts", result.ok, None if result.ok else result.report())
 
 
+def set_expert(on: bool) -> None:
+    """Turn BrickWright's ask_expert tool on (with Voxel's context hook) or off."""
+    from brickwright.tools.expert import EXPERT_CONTEXT_ENV
+
+    if on:
+        os.environ[EXPERT_CONTEXT_ENV] = CONTEXT_HOOK
+    else:
+        os.environ.pop(EXPERT_CONTEXT_ENV, None)
+
+
 def require_owned_check() -> None:
     """Make BrickWright run check_owned as a required check on every validate/finalize.
 
@@ -170,8 +187,11 @@ def build_prompt(
     inventory: Inventory,
     plan: Plan | None = None,
     spare: dict[PartKey, int] | None = None,
+    expert: bool = True,
 ) -> str:
-    """The builder's prompt. With a plan, only the planned parts and the spare set are listed."""
+    """The builder's prompt. With a plan, only the planned parts and the spare set are listed.
+    With expert, it tells the builder to call ask_expert when validate fails."""
+    rules = CHECK_OWNED_RULE + (f"\n{EXPERT_RULE}" if expert else "")
     if plan is None:
         lines = []
         for key in sorted(inventory.counts):
@@ -185,7 +205,7 @@ def build_prompt(
             "Format: part id | name | color | count owned\n"
             + "\n".join(lines)
             + "\n\n"
-            + CHECK_OWNED_RULE
+            + rules
         )
 
     planned = [
@@ -213,7 +233,7 @@ def build_prompt(
         "(part id | name | color | owned):\n"
         + ("\n".join(spares) if spares else "(none)")
         + "\n\n"
-        + CHECK_OWNED_RULE
+        + rules
     )
 
 
@@ -380,6 +400,7 @@ class DesignResult:
     plan_cost_usd: float = 0.0
     build_cost_usd: float = 0.0
     review_cost_usd: float = 0.0
+    expert_cost_usd: float = 0.0  # ask_expert calls (Sonnet, Opus) made during the build
     review_passed: bool | None = None  # None: not reviewed (skipped, or the gate failed)
     review_rounds: int = 0
     review_report: str = ""  # failed items of the last review
@@ -392,7 +413,13 @@ class DesignResult:
 
     @property
     def cost_usd(self) -> float:
-        return self.expand_cost_usd + self.plan_cost_usd + self.build_cost_usd + self.review_cost_usd
+        return (
+            self.expand_cost_usd
+            + self.plan_cost_usd
+            + self.build_cost_usd
+            + self.expert_cost_usd
+            + self.review_cost_usd
+        )
 
 
 @dataclass
@@ -500,6 +527,41 @@ def builder_retries():
         yield
     finally:
         loop.litellm_complete = original
+
+
+def expert_usage(record) -> list[tuple[str, Usage]]:
+    """The ask_expert calls of one builder run, per model (from its expert.json)."""
+    from brickwright.tools.expert import usage_by_model
+
+    return [
+        (model, Usage(row["input_tokens"], row["output_tokens"], row["cost_usd"]))
+        for model, row in usage_by_model(record.path).items()
+    ]
+
+
+def expert_rescues(record) -> int:
+    """Rescue-model calls made in one builder run."""
+    from brickwright.tools.expert import load_state, rescues_used
+
+    return rescues_used(load_state(record.path))
+
+
+def add_round_usage(ledger, build_model: str, record, used: Usage) -> None:
+    """One builder run: BrickWright's total includes the expert calls, so they go on
+    their own rows (step "expert") and the rest counts as build."""
+    experts = expert_usage(record)
+    for model, usage in experts:
+        ledger.add(model, "expert", usage)
+    spent = sum((usage for _, usage in experts), Usage())
+    ledger.add(
+        build_model,
+        "build",
+        Usage(
+            max(0, used.input_tokens - spent.input_tokens),
+            max(0, used.output_tokens - spent.output_tokens),
+            max(0.0, used.cost_usd - spent.cost_usd),
+        ),
+    )
 
 
 def interrupted_usage(record) -> Usage:
@@ -661,6 +723,7 @@ def design(
     asker=ask_questions,
     expander=expand,
     from_record: str | None = None,
+    use_expert: bool = True,
 ) -> DesignResult:
     """Expand, plan, build and review a design, using only what is in the inventory file.
 
@@ -698,6 +761,7 @@ def design(
     inventory = load_inventory(inventory_path)
     os.environ[INVENTORY_ENV] = str(inventory_path)  # the agent's child processes inherit this
     require_owned_check()
+    set_expert(use_expert)
     build_model = build_model or os.environ.get("BRICKWRIGHT_GENERATION_MODEL") or DEFAULT_MODEL
     kwargs = {"model": build_model, "max_cost": max_cost, "request_timeout": BUILD_CALL_TIMEOUT}
     if records_dir is not None:
@@ -721,6 +785,7 @@ def design(
             plan_cost_usd=ledger.step_cost("plan"),
             build_cost_usd=ledger.step_cost("build"),
             review_cost_usd=ledger.step_cost("review"),
+            expert_cost_usd=ledger.step_cost("expert"),
             usage=tuple(ledger.by_model()),
             reused_from=reused_from,
             max_cost=max_cost,
@@ -732,11 +797,18 @@ def design(
         budget_note = f"ran out before {where}"
         warn(f"the budget (${max_cost:.2f}) {budget_note}; ${budget.spent:.3f} spent")
 
+    rescues = 0  # rescue-model (Opus) calls of ask_expert so far in this run
+
     def round_config():
-        """This build round's config: BrickWright may spend what is left of the budget."""
+        """This build round's config: BrickWright may spend what is left of the budget,
+        and ask_expert may make the run's rescue calls that are left."""
         left = max(budget.remaining, 0.0)
         return config.model_copy(
-            update={"max_cost": left, "subagent_max_cost": min(config.subagent_max_cost, left)}
+            update={
+                "max_cost": left,
+                "subagent_max_cost": min(config.subagent_max_cost, left),
+                "expert_max_rescues": max(0, config.expert_max_rescues - rescues),
+            }
         )
     expansion: Expansion | None = None
     expansion_data: dict | None = None
@@ -795,7 +867,7 @@ def design(
         ledger.add(plan_model, "plan", planned.usage)
         plan = planned.plan
         plans = [plan_version(1, "initial", plan, planned.cost_usd)]
-    prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan))
+    prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan), expert=use_expert)
     expansion_text = expansion.as_text() if expansion is not None else None
 
     def new_record(record_prompt: str, from_id: str | None = None):
@@ -813,18 +885,20 @@ def design(
     def build_until_gate(record):
         """(record, gate passed, report). A builder call that fails for good sets
         `stopped` and returns that round's record as not passed (it is not gated)."""
-        nonlocal rounds, stopped
+        nonlocal rounds, stopped, rescues
         for attempt in range(1, max_retries + 2):
             try:
                 with builder_retries():
                     run_report = run(record, round_config())
             except CallFailed as err:
-                ledger.add(build_model, "build", interrupted_usage(record))
+                add_round_usage(ledger, build_model, record, interrupted_usage(record))
+                rescues += expert_rescues(record)
                 rounds += 1
                 stopped = f"{err.reason}, in build round {rounds}"
                 return record, False, f"Not checked: {stopped}."
             used, known = run_usage(run_report)
-            ledger.add(build_model, "build", used)
+            add_round_usage(ledger, build_model, record, used)
+            rescues += expert_rescues(record)
             if not known:
                 warn(
                     f"BrickWright could not price all of the builder's calls in {record.id}; "
@@ -914,7 +988,7 @@ def design(
         plans.append(
             plan_version(len(plans) + 1, f"revised after review round {review_round}", plan, revised.cost_usd)
         )
-        prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan))
+        prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan), expert=use_expert)
         if not budget.allows("build"):
             out_of_budget(f"the rebuild with plan v{len(plans)}")
             break
@@ -946,6 +1020,7 @@ def design(
         plan_cost_usd=ledger.step_cost("plan"),
         build_cost_usd=ledger.step_cost("build"),
         review_cost_usd=ledger.step_cost("review"),
+        expert_cost_usd=ledger.step_cost("expert"),
         review_passed=review_passed,
         review_rounds=len(reviews),
         review_report=failed_text if review_passed is False else "",
@@ -970,7 +1045,7 @@ def cost_line(result: DesignResult) -> str:
     return (
         f"Cost: ${result.cost_usd:.3f} (expand ${result.expand_cost_usd:.3f} + "
         f"plan ${result.plan_cost_usd:.3f} + build ${result.build_cost_usd:.3f} + "
-        f"review ${result.review_cost_usd:.3f})"
+        f"expert ${result.expert_cost_usd:.3f} + review ${result.review_cost_usd:.3f})"
     )
 
 
@@ -1049,6 +1124,11 @@ def main(argv=None) -> int:
         default=None,
         help="reuse that record's expansion and latest plan; skip questions, expand and plan",
     )
+    parser.add_argument(
+        "--no-expert",
+        action="store_true",
+        help="do not offer the builder the ask_expert tool (Sonnet, then Opus, fixes failed checks)",
+    )
     args = parser.parse_args(argv)
     if not args.request and not args.from_record:
         parser.error("the request is required unless --from-record is given")
@@ -1075,6 +1155,7 @@ def main(argv=None) -> int:
             use_expand=not args.no_expand,
             ask_user=not args.no_questions,
             from_record=args.from_record,
+            use_expert=not args.no_expert,
         )
     except RecordError as err:
         print(f"Error: cannot reuse record {args.from_record}: {err}", file=sys.stderr)
