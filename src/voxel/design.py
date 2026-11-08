@@ -35,6 +35,12 @@ Two layers keep the agent honest (both against the FULL inventory):
    itself (final_gate). If it fails, the agent is run again from that build with
    the report (up to max_retries times).
 
+Build steps are computed in code, not by the builder: after the inventory
+check, the gate orders the parts bottom-up into pages of at most 12
+(voxel.sequence), writes them as out/build.ldr (the builder's own order is kept
+as out/build.unordered.ldr), and runs check_steps on that order as a safety
+check. Parts nothing holds up go back to the builder as a normal retry.
+
 Run it:
     python -m voxel.design "a small red tower" --inventory inventory.json
 """
@@ -78,12 +84,15 @@ from .plan import (
 )
 from .review import DEFAULT_REVIEW_MODEL, Review, ReviewError, review_report
 from .review import review as run_review
-from .steps import MAX_STEP_PARTS, step_problems
+from .sequence import sequence, stepped_build
+from .steps import step_problems
 
 INVENTORY_ENV = "VOXEL_INVENTORY"
 REQUIRED_CHECKS_ENV = "BRICKWRIGHT_REQUIRED_CHECKS"  # read by brickwright's validation
 OWNED_CHECK = "voxel.design:check_owned"
-STEPS_CHECK = "voxel.steps:check_steps"
+OUT_DIR = "out"  # BrickWright's output folder in a record
+STEPPED_LDR = "build.ldr"  # the build in Voxel's step order
+UNORDERED_LDR = "build.unordered.ldr"  # the build in the builder's own order
 DEFAULT_MODEL = "claude-haiku-5-5"  # the build model
 PLAN_FILE = "plan.json"
 PLANS_FILE = "plans.json"  # every plan version, in the final record
@@ -129,31 +138,18 @@ def check_owned(tests, inventory_path: str | Path | None = None) -> None:
 
 
 def require_owned_check() -> None:
-    """Make BrickWright run check_owned and check_steps as required checks on every
-    validate/finalize."""
+    """Make BrickWright run check_owned as a required check on every validate/finalize.
+
+    Build steps are not a builder check: Voxel computes them after the gate."""
     current = [t.strip() for t in os.environ.get(REQUIRED_CHECKS_ENV, "").split(",") if t.strip()]
-    missing = [c for c in (OWNED_CHECK, STEPS_CHECK) if c not in current]
-    if missing:
-        os.environ[REQUIRED_CHECKS_ENV] = ",".join([*current, *missing])
+    if OWNED_CHECK not in current:
+        os.environ[REQUIRED_CHECKS_ENV] = ",".join([*current, OWNED_CHECK])
 
 
 CHECK_OWNED_RULE = (
     "Your run_tests() must include `from voxel import check_owned` and a call "
     "`check_owned(tests)`. Do not remove, weaken or work around it."
 )
-
-
-def steps_rule(with_plan: bool) -> str:
-    """How to split the build into steps; Voxel's step check enforces this."""
-    rules = [
-        f"Call build.add_step() after each group of at most {MAX_STEP_PARTS} parts.",
-        "Add parts bottom-up, so every part sits on parts from earlier steps.",
-        "Place parts directly in the build. If you use sub-models, each must have at "
-        f"most {MAX_STEP_PARTS} parts, because steps can't split a sub-model.",
-    ]
-    if with_plan:
-        rules.append("Follow the plan's sections in order, bottom to top, as the step order.")
-    return "BUILD STEPS:\n" + "\n".join(f"- {r}" for r in rules)
 
 
 def build_prompt(
@@ -174,8 +170,6 @@ def build_prompt(
             "than the count given. Do not use any other part or color.\n"
             "Format: part id | name | color | count owned\n"
             + "\n".join(lines)
-            + "\n\n"
-            + steps_rule(with_plan=False)
             + "\n\n"
             + CHECK_OWNED_RULE
         )
@@ -204,8 +198,6 @@ def build_prompt(
         "(part id | name | color | owned):\n"
         + ("\n".join(spares) if spares else "(none)")
         + "\n\n"
-        + steps_rule(with_plan=True)
-        + "\n\n"
         + CHECK_OWNED_RULE
     )
 
@@ -213,19 +205,56 @@ def build_prompt(
 # --- Layer 2: the independent gate --------------------------------------------
 
 
+NOT_HELD_UP = (
+    "These parts are not held up: each part must touch the ground, or be clipped to "
+    "or rest on a part that is held up. Fix or remove them:"
+)
+
+
+@dataclass(frozen=True)
+class Ordered:
+    """Voxel's step order for one build: the parts nothing holds up, or the LDraw files."""
+
+    problems: list[str]
+    pages: int = 0
+    stepped_ldr: str = ""  # the build in page order, a 0 STEP after each page
+    unordered_ldr: str = ""  # the build in the builder's own order
+
+
+def order_build(build) -> Ordered:
+    """Compute the build steps (voxel.sequence), then check them with step_problems."""
+    from bricklayer import to_ldraw
+
+    if not build.flattened_placements:
+        return Ordered(["the build has no parts"])
+    seq = sequence(build)
+    if seq.unplaced:
+        return Ordered(seq.unplaced)
+    stepped = stepped_build(build, seq.pages)
+    # The safety check on the computed order. A floating part here would be a
+    # Voxel bug, but the builder can still fix it by holding the part up.
+    problems = [line.split(": ", 1)[-1].removesuffix(" floats") for line in step_problems(stepped)]
+    if problems:
+        return Ordered(problems)
+    return Ordered([], len(seq.pages), to_ldraw(stepped), to_ldraw(build))
+
+
 def _gate_worker(build_path: str, inventory_path: str):
-    """Runs in a child process. Returns (CheckResult, step problems), or an error string."""
+    """Runs in a child process. Returns (CheckResult, Ordered), or an error string."""
     try:
         from brickwright.tools import build_execution
 
         build = build_execution.create_build(build_path)
-        return check_build(build, load_inventory(inventory_path)), step_problems(build)
+        return check_build(build, load_inventory(inventory_path)), order_build(build)
     except BaseException:
         return traceback.format_exc()[-2000:]
 
 
 def final_gate(build_path: str | Path, inventory_path: str | Path) -> tuple[bool, str]:
-    """Check a finished build.py against the inventory and its steps. Returns (ok, report)."""
+    """Check a finished build.py against the inventory, and compute its build steps.
+
+    On success the record's out/build.ldr holds the build in Voxel's step order,
+    and out/build.unordered.ldr the builder's own order. Returns (ok, report)."""
     from brickwright.tools import build_execution
 
     try:
@@ -236,14 +265,17 @@ def final_gate(build_path: str | Path, inventory_path: str | Path) -> tuple[bool
         return False, f"Inventory gate could not run the build: {err}"
     if isinstance(outcome, str):
         return False, f"Inventory gate could not build build.py:\n{outcome}"
-    inventory_result, steps = outcome
-    assert isinstance(inventory_result, CheckResult)
-    ok = inventory_result.ok and not steps
-    if ok:
-        return True, "Inventory and step checks passed."
+    inventory_result, ordered = outcome
+    assert isinstance(inventory_result, CheckResult) and isinstance(ordered, Ordered)
+    if inventory_result.ok and not ordered.problems:
+        out = Path(build_path).parent / OUT_DIR
+        out.mkdir(parents=True, exist_ok=True)
+        (out / UNORDERED_LDR).write_text(ordered.unordered_ldr, encoding="utf-8")
+        (out / STEPPED_LDR).write_text(ordered.stepped_ldr, encoding="utf-8")
+        return True, f"Inventory check passed; build steps computed ({ordered.pages} pages)."
     parts = [] if inventory_result.ok else [inventory_result.report()]
-    if steps:
-        parts.append("Step check failed:\n" + "\n".join(f"  - {p}" for p in steps))
+    if ordered.problems:
+        parts.append(NOT_HELD_UP + "\n" + "\n".join(f"  - {p}" for p in ordered.problems))
     return False, "\n".join(parts)
 
 
@@ -258,8 +290,7 @@ def feedback_prompt(problem: str, base_prompt: str, *, new_plan: bool = False) -
     starts empty. Otherwise build.py holds the earlier build of the same plan.
     """
     rules = (
-        "It must use only the parts and counts listed above, and every build step "
-        f"(build.add_step()) must stand on its own with at most {MAX_STEP_PARTS} parts. "
+        "It must use only the parts and counts listed above. "
         "Keep check_owned(tests) in run_tests()."
     )
     if new_plan:
@@ -279,7 +310,7 @@ def feedback_prompt(problem: str, base_prompt: str, *, new_plan: bool = False) -
 
 
 def gate_problem(report: str) -> str:
-    return f"failed Voxel's independent checks (inventory and build steps):\n{report}"
+    return f"failed Voxel's independent checks (inventory, and parts held up):\n{report}"
 
 
 def review_problem(result: Review) -> str:
@@ -296,7 +327,15 @@ def render_build(record, config) -> tuple[Path | None, str]:
 
         if not render_available():
             return None, "no LDraw library found (set LDRAW_LIBRARY_PATH in .env)"
-        report = render(record, config)
+        # BrickWright's render rewrites out/build.ldr from build.py, in the
+        # builder's order; put the gate's stepped version back afterwards.
+        stepped_path = Path(record.path) / OUT_DIR / STEPPED_LDR
+        stepped = stepped_path.read_text(encoding="utf-8") if stepped_path.exists() else None
+        try:
+            report = render(record, config)
+        finally:
+            if stepped is not None:
+                stepped_path.write_text(stepped, encoding="utf-8")
     except Exception as err:
         return None, f"render failed: {err}"
     if not report.ok or report.image_path is None:
@@ -317,7 +356,7 @@ def save_reviews(record, reviews: list[dict]) -> Path:
 
 @dataclass(frozen=True)
 class DesignResult:
-    ok: bool  # the kept build passed the inventory and step gate
+    ok: bool  # the kept build passed the gate (inventory, parts held up)
     record_id: str
     build_path: Path
     rounds: int  # builder runs, over all gate retries and review rounds
@@ -834,7 +873,7 @@ def main(argv=None) -> int:
         print(f"Error: planning failed. {err}", file=sys.stderr)
         print(f"Cost so far: ${err.cost_usd:.3f}", file=sys.stderr)
         return 1
-    print(f"\n{'PASSED' if result.ok else 'FAILED'} the inventory and step gate after {result.rounds} round(s).")
+    print(f"\n{'PASSED' if result.ok else 'FAILED'} the gate (inventory, parts held up) after {result.rounds} round(s).")
     if result.ok:
         print(review_line(result))
         if result.review_passed is False and result.review_note:

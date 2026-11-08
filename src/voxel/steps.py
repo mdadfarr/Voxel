@@ -1,5 +1,8 @@
 """The step check: can the build be put together in its own step order?
 
+Voxel computes the step order itself (voxel.sequence); this check is the safety
+check on that computed order, not a rule for the builder.
+
 For every build-step boundary, the parts placed so far must stand on their own:
 nothing floats. Each step may add at most MAX_STEP_PARTS parts. Collisions are
 not checked per step: a collision in a partial build is also in the full build,
@@ -14,7 +17,7 @@ STEPS_CHECK_NAME = "buildable_steps"
 MAX_STEP_PARTS = 12
 
 
-def _describe(leaf: bl.Placement) -> str:
+def describe_leaf(leaf: bl.Placement) -> str:
     element = leaf.content
     lo = leaf.bounding_box[0]
     return f"{element.color.display_name} {element.ldraw_id} at ({lo.x:g},{lo.y:g},{lo.z:g})"
@@ -48,7 +51,7 @@ def step_problems(build: bl.LegoBuild) -> list[str]:
         for index, leaf in enumerate(leaves):
             if id(leaf) in floating and index not in reported:
                 reported.add(index)
-                problems.append(f"step {number}: {_describe(leaf)} floats")
+                problems.append(f"step {number}: {describe_leaf(leaf)} floats")
         previous_marker, previous_parts = marker, len(leaves)
     return problems
 

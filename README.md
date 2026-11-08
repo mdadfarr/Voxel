@@ -68,6 +68,15 @@ first). Retry rounds after a failed gate continue from the previous build and
 get all of that again, plus the gate report. The inventory checks still use the
 full inventory.
 
+The builder does not split the build into steps; Voxel does that in code once
+the inventory check passes. It starts with the parts on the ground, then keeps
+adding parts that are clipped to or rest on a part already placed (in the order
+`build.py` wrote them), in pages of at most 12 parts. Parts on the same part
+below share a page when they fit. The result is `out/build.ldr` with a `0 STEP`
+after each page; the builder's own order is kept as `out/build.unordered.ldr`.
+The step check then runs on the computed order as a safety check. Parts that
+nothing holds up are sent back to the builder as a normal gate retry.
+
 After the build passes the gate, it is rendered and one review call (Opus,
 with the render attached) answers pass/fail with a short reason for each
 checklist item in the plan. The first item ("looks like ...") is judged from

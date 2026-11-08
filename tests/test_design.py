@@ -368,7 +368,8 @@ def test_retry_prompt_repeats_plan_parts_and_report(tmp_path):
     assert "3001 | Brick 2 x 4 | RED | 2 | 2" in retry
     assert "3023 | Plate 1 x 2 | RED | 4" in retry
     assert "PREVIOUS ATTEMPT" in retry and "used 3, owned 2" in retry
-    assert "inventory and build steps" in retry and "at most 12 parts" in retry
+    assert "inventory, and parts held up" in retry
+    assert "step" not in retry.split("PREVIOUS ATTEMPT")[1]  # steps are Voxel's job now
     assert "PREVIOUS ATTEMPT" not in first
 
 
@@ -400,15 +401,12 @@ def test_prompt_with_plan_lists_only_planned_and_spare_parts():
     assert "3039 | Slope Brick 45 2 x 2 | RED | 2" in text and "BLUE" not in text
     assert "z and height are in bricks (1 brick = 3 plates)" in text
     assert "check_owned(tests)" in text and "ONLY" in text
-    assert "build.add_step() after each group of at most 12 parts" in text
-    assert "bottom-up" in text and "sub-models" in text
-    assert "plan's sections in order, bottom to top" in text
+    assert "BUILD STEPS" not in text and "add_step" not in text
 
 
-def test_prompt_without_plan_has_steps_rules_but_no_plan_line():
+def test_prompt_without_plan_has_no_steps_rules_and_no_plan_line():
     text = dz.build_prompt("a tower", Inventory({("3001", RED.ldraw_id): 5}))
-    assert "build.add_step() after each group of at most 12 parts" in text
-    assert "bottom-up" in text and "sub-models" in text
+    assert "BUILD STEPS" not in text and "add_step" not in text
     assert "plan's sections" not in text
 
 

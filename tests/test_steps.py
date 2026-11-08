@@ -76,13 +76,12 @@ def test_trailing_parts_after_last_marker_are_a_step():
     assert not ok and detail.startswith("step 2: Red 3001") and detail.endswith("floats")
 
 
-def test_require_owned_check_adds_both_once(monkeypatch):
+def test_require_owned_check_adds_only_the_owned_check_once(monkeypatch):
     monkeypatch.setenv(dz.REQUIRED_CHECKS_ENV, "other:check")
     dz.require_owned_check()
     dz.require_owned_check()
-    assert dz.REQUIRED_CHECKS_ENV and dz.os.environ[dz.REQUIRED_CHECKS_ENV] == (
-        f"other:check,{dz.OWNED_CHECK},{dz.STEPS_CHECK}"
-    )
+    # Build steps are computed by Voxel after the gate, not checked in the builder.
+    assert dz.os.environ[dz.REQUIRED_CHECKS_ENV] == f"other:check,{dz.OWNED_CHECK}"
 
 
 def test_required_check_runs_through_brickwright(tmp_path, monkeypatch):
@@ -98,7 +97,7 @@ def test_required_check_runs_through_brickwright(tmp_path, monkeypatch):
         "def run_tests():\n"
         "    return []\n"
     )
-    monkeypatch.setenv(dz.REQUIRED_CHECKS_ENV, dz.STEPS_CHECK)
+    monkeypatch.setenv(dz.REQUIRED_CHECKS_ENV, "voxel.steps:check_steps")
     _, report = build_and_validate(str(src))
     text = str(report)
     assert STEPS_CHECK_NAME in text and "no step markers" in text
