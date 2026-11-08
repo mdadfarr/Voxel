@@ -38,7 +38,7 @@ skipped with a warning. (`scripts/bw` sets the path for you;
 Then:
 
 ```powershell
-python -m voxel.design "a small red tower" --inventory inventory.json --max-cost 0.5
+python -m voxel.design "a small red tower" --inventory inventory.json --max-cost 1.5
 ```
 
 The run goes Expand -> Plan -> Build -> Review.
@@ -98,6 +98,23 @@ line splits it by model, with tokens:
 The same numbers, plus which steps used each model, are saved as `usage.json`
 in the final record.
 
+`--max-cost` is one budget for the whole run: questions, description, plan,
+plan revisions, every build round and every review. Before each step Voxel
+checks what is left (at least a small floor per step, or the most that step
+has cost so far in this run), and each build round gets the rest as
+BrickWright's own cap. When the budget runs out, the run stops and keeps the
+last build that passed the gate; the summary says where:
+`Budget: $1.12 of $1.50 used; ran out before review round 2, kept <record_id>`.
+BrickWright checks its cap between turns, so the total can go over by one
+builder turn.
+
+Every prompt uses one definition of front: the front of the model is its +y
+side (the largest y), the side BrickWright's front render shows; the side
+render shows the -x side. All JSON calls (questions, description, plan,
+revision, review) use structured output, so the reply is JSON in the expected
+shape; a reply cut off at the token limit or rejected by the checks is retried
+once with the reason.
+
 To compare builder models on the exact same plan, reuse an earlier record:
 
 ```powershell
@@ -113,14 +130,14 @@ plan is checked against your current inventory first. Records made before
 
 Exit codes: 0 when the gate passed and the review passed or was skipped, 2 when
 the gate failed, 3 when the gate passed but the review still failed after 2
-rounds.
+rounds, 4 when the budget ran out before any build passed the gate.
 
 Flags:
 
 - `--plan-model`: model for the planning call (default `claude-opus-5-5`).
 - `--build-model`: model for the builder agent (default `claude-haiku-5-5`).
   `--model` still works as another name for it.
-- `--max-cost`: USD cap per build round (default 0.5).
+- `--max-cost`: USD cap for the whole run (default 1.5).
 - `--max-retries`: builder rounds after a failed gate (default 2).
 - `--inventory`: inventory file (default `inventory.json`).
 - `--no-questions`: do not ask; use every question's default answer. The

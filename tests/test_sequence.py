@@ -173,3 +173,50 @@ def test_render_puts_the_stepped_ldr_back(tmp_path, monkeypatch):
     monkeypatch.setattr(rendering, "render", fake_render)
     assert dz.render_build(SimpleNamespace(path=tmp_path), None) == (image, "")
     assert (out / "build.ldr").read_text() == "stepped"
+
+
+# --- python -m voxel.sequence <record_id> --------------------------------------
+
+
+def fake_record(tmp_path, levels, record_id="20260101-000000-a-tower-abc12345"):
+    """A record folder with only a build.py and BrickWright's own out/build.ldr."""
+    record = tmp_path / "records" / record_id
+    record.mkdir(parents=True)
+    write_build(record, levels)
+    (record / "out").mkdir()
+    (record / "out" / "build.ldr").write_text("the builder's build.ldr")
+    return record
+
+
+def run_command(tmp_path, record, capsys):
+    from voxel.sequence import main
+
+    code = main([record.name, "--records-dir", str(tmp_path / "records")])
+    return code, capsys.readouterr().out
+
+
+def test_command_writes_stepped_ldr_and_keeps_build_ldr(tmp_path, capsys):
+    record = fake_record(tmp_path, [2, 1, 0])  # top-first
+    code, out = run_command(tmp_path, record, capsys)
+    assert code == 0
+    assert out.splitlines()[:4] == ["Parts: 3", "Pages: 1", "Moved from code order: 2", "check_steps: passed"]
+    stepped = (record / "out" / "build.stepped.ldr").read_text()
+    assert stepped.count("0 STEP") == 1
+    heights = [line.split()[3] for line in stepped.splitlines() if line.startswith("1 ")]
+    assert heights == sorted(heights, key=float, reverse=True)  # LDraw -y is up: bottom first
+    assert (record / "out" / "build.ldr").read_text() == "the builder's build.ldr"
+
+
+def test_command_prints_unplaced_parts_and_writes_nothing(tmp_path, capsys):
+    record = fake_record(tmp_path, [0, 5])
+    code, out = run_command(tmp_path, record, capsys)
+    assert code == 2
+    assert "Unplaced: 1 part(s)" in out and "Red 3001 at (2,2,5)" in out
+    assert not (record / "out" / "build.stepped.ldr").exists()
+
+
+def test_command_reports_a_missing_record(tmp_path, capsys):
+    from voxel.sequence import main
+
+    assert main(["nope", "--records-dir", str(tmp_path)]) == 1
+    assert "not found" in capsys.readouterr().err

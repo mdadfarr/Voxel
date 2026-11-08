@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import json
 import mimetypes
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+from pydantic import BaseModel
 
 
 def default_complete() -> Callable[..., Any]:
@@ -19,6 +22,13 @@ def default_complete() -> Callable[..., Any]:
 def response_text(response: Any) -> str:
     try:
         return response.choices[0].message.content or ""
+    except (AttributeError, IndexError):
+        return ""
+
+
+def finish_reason(response: Any) -> str:
+    try:
+        return response.choices[0].finish_reason or ""
     except (AttributeError, IndexError):
         return ""
 
@@ -96,6 +106,10 @@ class HasUsage:
         return Usage(self.input_tokens, self.output_tokens, self.cost_usd)  # type: ignore[attr-defined]
 
 
+class CutOff(ValueError):
+    """The reply hit the output-token limit, so its JSON is incomplete."""
+
+
 def call_with_retry(
     complete: Callable[..., Any],
     *,
@@ -104,19 +118,32 @@ def call_with_retry(
     parse: Callable[[str], Any],
     max_tokens: int,
     what: str,
+    schema: type[BaseModel] | None = None,
 ) -> tuple[Any, Usage, int]:
     """One call; if `parse` raises ValueError, retry once with the error.
+
+    With a schema (a Pydantic model), the call asks for structured output
+    (response_format): litellm sends it as Anthropic's output_format, so the
+    reply is JSON in the schema's shape. Constraints the API cannot enforce
+    (lengths, minimums, validators) are still checked by `parse`. A reply cut off
+    at max_tokens is reported as such, since its JSON is incomplete.
 
     Returns (parsed value, usage of all attempts, attempts). Raises ReplyError
     after 2 failures.
     """
     messages = list(messages)
+    extra = {"response_format": schema} if schema is not None else {}
     usage, error = Usage(), ""
     for attempt in (1, 2):
-        response = complete(model=model, messages=messages, max_tokens=max_tokens)
+        response = complete(model=model, messages=messages, max_tokens=max_tokens, **extra)
         usage += Usage.of(response)
         text = response_text(response)
         try:
+            if finish_reason(response) == "length":
+                raise CutOff(
+                    f"the reply was cut off at the {max_tokens}-token output limit, so the JSON "
+                    "is incomplete. Write it more concisely (shorter names and reasons)"
+                )
             return parse(text), usage, attempt
         except ValueError as err:
             error = str(err)
@@ -128,6 +155,19 @@ def call_with_retry(
             },
         ]
     raise ReplyError(f"No usable {what} after 2 attempts. Last error: {error}", usage, 2)
+
+
+def load_json(text: str) -> Any:
+    """json.loads after strip_fences. A ValueError names the exact error position."""
+    text = strip_fences(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as err:
+        near = text[max(0, err.pos - 40) : err.pos + 40]
+        raise ValueError(
+            f"the reply is not valid JSON: {err.msg} at line {err.lineno} column {err.colno} "
+            f"(character {err.pos} of {len(text)}), near: {near!r}"
+        ) from None
 
 
 def image_part(image_path: str | Path) -> dict:

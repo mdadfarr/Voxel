@@ -25,7 +25,7 @@ from typing import Any, Callable, Literal
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from .inventory import Inventory, color_name
-from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, strip_fences
+from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, load_json
 from .parts import SHAPES, part_name, shape_kind
 from .plan import StrictModel
 
@@ -33,7 +33,7 @@ DEFAULT_EXPAND_MODEL = "claude-opus-5-5"
 MAX_QUESTIONS = 3
 MAX_FEATURES = 8
 MIN_COLOR_PIECES = 20  # a color is offered only if you own at least this many pieces of it
-MAX_TOKENS = 4096
+MAX_TOKENS = 8192
 
 
 # --- Inventory summary --------------------------------------------------------
@@ -165,10 +165,7 @@ def questions_prompt(request: str, inventory: Inventory) -> str:
 
 
 def parse_questions(text: str, inventory: Inventory) -> list[Question]:
-    try:
-        data = json.loads(strip_fences(text))
-    except json.JSONDecodeError as err:
-        raise ValueError(f"the reply is not valid JSON: {err}") from None
+    data = load_json(text)
     try:
         questions = Questions.model_validate(data).questions
     except ValidationError as err:
@@ -250,10 +247,7 @@ def expand_prompt(request: str, answers: list[Answer], inventory: Inventory) -> 
 
 
 def parse_expansion(text: str) -> Expansion:
-    try:
-        data = json.loads(strip_fences(text))
-    except json.JSONDecodeError as err:
-        raise ValueError(f"the reply is not valid JSON: {err}") from None
+    data = load_json(text)
     try:
         return Expansion.model_validate(data)
     except ValidationError as err:
@@ -301,6 +295,7 @@ def ask_questions(
             parse=lambda text: parse_questions(text, inventory),
             max_tokens=MAX_TOKENS,
             what="questions",
+            schema=Questions,
         )
     except ReplyError as err:
         raise ExpandError.from_reply(err) from None
@@ -324,6 +319,7 @@ def expand(
             parse=parse_expansion,
             max_tokens=MAX_TOKENS,
             what="description",
+            schema=Expansion,
         )
     except ReplyError as err:
         raise ExpandError.from_reply(err) from None

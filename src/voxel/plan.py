@@ -27,7 +27,7 @@ import bricklayer as bl
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .inventory import Inventory, PartKey, color_name, key_label
-from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, image_part, strip_fences
+from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, image_part, load_json
 from .parts import SPARE_KINDS, part_kind, part_name, part_size
 
 if TYPE_CHECKING:
@@ -35,10 +35,19 @@ if TYPE_CHECKING:
     from .review import Review
 
 DEFAULT_PLAN_MODEL = "claude-opus-5-5"
-MAX_TOKENS = 8192
+MAX_TOKENS = 16384  # a plan is long; a cut-off reply is incomplete JSON
 MAX_SPARE_ROWS = 40
 UNITS = "z and height are in bricks (1 brick = 3 plates)"
 UNITS_HINT = f"{UNITS}; a plate is 1/3 brick, so use whole numbers or .333 / .667"
+# One definition of "front" for every prompt: the planner, revise, the builder
+# and the reviewer. BrickWright's front render looks at the build from large y
+# toward -y (checked with a test render), so the front is the +y side.
+ORIENTATION = (
+    "Orientation: the front of the model is its +y side (the largest y), the side the "
+    "front render shows; put front features there. The side render shows the -x side "
+    "(the smallest x)."
+)
+TILES_RULE = "Cover visible surfaces with tiles (smooth parts with no studs) for a clean look."
 
 
 def parse_color(value: str) -> int:
@@ -272,10 +281,12 @@ def plan_format_and_rules(inventory: Inventory) -> str:
         "Rules:\n"
         f"- Units: x, y, width and depth are in studs; {UNITS_HINT}. This is the unit "
         "BrickLayer's add() uses.\n"
+        f"- {ORIENTATION}\n"
         "- Use ONLY parts and colors from the inventory below, and never more than the count owned.\n"
         "- Write colors exactly as in the inventory (like RED).\n"
         "- Use shaped parts (slopes, curved, round, tiles) for outlines and curves, not only "
         "plain bricks.\n"
+        f"- {TILES_RULE}\n"
         "- Follow the size and proportions in the description, if one is given.\n\n"
         f"Example of the shape:\n{json.dumps(EXAMPLE, indent=2)}\n\n"
         "Inventory (part id | name | color | count owned):\n" + "\n".join(lines)
@@ -293,10 +304,7 @@ def plan_prompt(request: str, inventory: Inventory, expansion: Expansion | None 
 
 def parse_plan(text: str, inventory: Inventory, expansion: Expansion | None = None) -> Plan:
     """Parse and check a plan. Raises ValueError with a message meant for the planner."""
-    try:
-        data = json.loads(strip_fences(text))
-    except json.JSONDecodeError as err:
-        raise ValueError(f"the reply is not valid JSON: {err}") from None
+    data = load_json(text)
     try:
         plan = Plan.model_validate(data)
     except ValidationError as err:
@@ -323,6 +331,7 @@ def _plan_call(complete, model, content, parse) -> PlanResult:
             parse=parse,
             max_tokens=MAX_TOKENS,
             what="plan",
+            schema=Plan,
         )
     except ReplyError as err:
         raise PlanError.from_reply(err) from None

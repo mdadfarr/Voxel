@@ -970,3 +970,151 @@ def test_failed_step_usage_is_counted(tmp_path):
     with pytest.raises(PlanError) as info:
         expand_design(tmp_path, ask=fake_ask("", ""), planner=failing)
     assert info.value.cost_usd == pytest.approx(0.06 + 0.07)  # expand + the failed plan calls
+
+
+# --- One definition of front -----------------------------------------------------
+
+
+def test_all_prompts_share_one_definition_of_front(tmp_path):
+    from voxel.plan import ORIENTATION, plan_prompt, revise_prompt
+    from voxel.review import review_prompt
+
+    inv = Inventory({("3001", RED.ldraw_id): 5})
+    plan = Plan.model_validate(TOWER_PLAN)
+    review = Review(verdicts=[Verdict(index=1, item="looks like a tower", passed=False, reason="no")])
+    prompts = {
+        "plan": plan_prompt("a tower", inv),
+        "revise": revise_prompt(plan, review, None, inv),
+        "build": dz.build_prompt("a tower", inv, plan, spare_set(inv, plan)),
+        "build without plan": dz.build_prompt("a tower", inv),
+        "review": review_prompt(plan, None),
+    }
+    assert ORIENTATION.startswith("Orientation: the front of the model is its +y side")
+    assert [name for name, text in prompts.items() if ORIENTATION not in text] == []
+    # No prompt may define front any other way.
+    assert not any("-y side" in text or "y=0" in text for text in prompts.values())
+
+
+# --- One budget for the whole run ------------------------------------------------
+
+
+def budget_run(sizes, cost=0.1):
+    """Like fake_run_factory, and records the budget BrickWright got for each round."""
+    run = fake_run_factory(sizes, cost)
+    inner = run
+
+    def run_with_config(record, config):
+        run_with_config.caps.append((config.max_cost, config.subagent_max_cost))
+        return inner(record, config)
+
+    run_with_config.calls = run.calls
+    run_with_config.caps = []
+    return run_with_config
+
+
+def test_budget_covers_every_step_and_builder_gets_what_is_left(tmp_path):
+    run = budget_run([2, 2])
+    reviser = fake_reviser(cost=0.05)
+    result = run_design(
+        tmp_path,
+        make_inventory(tmp_path),
+        run,
+        use_expand=True,
+        ask_user=False,
+        asker=fake_asker(cost=0.02),
+        expander=fake_expander(cost=0.04),
+        planner=fake_planner(cost=0.05),
+        renderer=fake_renderer,
+        reviewer=fake_reviewer([[False, True], [True, True]], cost=0.03),
+        reviser=reviser,
+    )
+    total = 0.02 + 0.04 + 0.05 + 0.1 + 0.03 + 0.05 + 0.1 + 0.03
+    assert result.cost_usd == pytest.approx(total)
+    assert result.max_cost == dz.DEFAULT_MAX_COST == 1.5 and result.budget_note == ""
+    # Round 1 gets 1.5 minus expand and plan; the rebuild also minus build, review and revise.
+    assert run.caps == [(pytest.approx(1.39), 1.0), (pytest.approx(1.21), 1.0)]
+    assert dz.budget_line(result) == f"Budget: ${total:.3f} of $1.50 used"
+    usage = json.loads((tmp_path / "rec" / result.record_id / dz.USAGE_FILE).read_text())
+    assert usage["max_cost_usd"] == 1.5 and usage["budget_note"] is None
+
+
+def test_builder_subagent_cap_shrinks_with_the_budget(tmp_path):
+    run = budget_run([2])
+    run_design(tmp_path, make_inventory(tmp_path), run, max_cost=0.4)
+    assert run.caps == [(pytest.approx(0.35), pytest.approx(0.35))]
+
+
+def test_budget_out_before_the_plan_stops_without_a_build(tmp_path, monkeypatch, capsys):
+    planner, run = fake_planner(), fake_run_factory([2])
+    with pytest.raises(dz.BudgetError) as info:
+        run_design(tmp_path, make_inventory(tmp_path), run, planner=planner, max_cost=0.05)
+    assert "ran out before the plan" in str(info.value) and "No build was made" in str(info.value)
+    assert planner.calls == [] and run.calls == []
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    def fake_design(request, inventory, **kwargs):
+        raise dz.BudgetError("the budget ($0.05) ran out before the plan", 0.0)
+
+    monkeypatch.setattr(dz, "design", fake_design)
+    assert dz.main(["a tower", "--inventory", str(make_inventory(tmp_path))]) == 4
+    assert "ran out before the plan" in capsys.readouterr().err
+
+
+def test_budget_out_before_a_gate_retry(tmp_path):
+    run = fake_run_factory([3, 2])  # the first build fails the gate
+    result = run_design(tmp_path, make_inventory(tmp_path), run, max_cost=0.2)
+    assert len(run.calls) == 1 and not result.ok
+    assert result.budget_note == "ran out before gate retry 1"
+    assert dz.exit_code(result) == 4
+
+
+def test_budget_out_before_the_review_keeps_the_build(tmp_path):
+    reviewer = fake_reviewer([[True, True]])
+    result = run_design(
+        tmp_path, make_inventory(tmp_path), fake_run_factory([2]), max_cost=0.19,
+        renderer=fake_renderer, reviewer=reviewer,
+    )
+    assert reviewer.calls == [] and result.ok and result.review_passed is None
+    assert dz.review_line(result) == "Review: skipped (budget ran out)"
+    assert dz.budget_line(result) == (
+        f"Budget: $0.150 of $0.19 used; ran out before review round 1, kept {result.record_id}"
+    )
+    assert dz.exit_code(result) == 0
+
+
+def test_budget_out_before_a_revision_keeps_the_reviewed_build(tmp_path):
+    run, reviser = fake_run_factory([2, 2]), fake_reviser()
+    result = run_design(
+        tmp_path, make_inventory(tmp_path), run, max_cost=0.3,
+        renderer=fake_renderer, reviewer=fake_reviewer([[False, True]]), reviser=reviser,
+    )
+    assert reviser.calls == [] and len(run.calls) == 1  # 0.12 left: not enough for revise + build
+    assert result.ok and result.review_passed is False and result.record_id == run.calls[0]
+    assert result.budget_note == "ran out before plan revision 1"
+
+
+def test_budget_estimate_uses_the_largest_cost_seen():
+    ledger = dz.UsageLedger()
+    budget = dz.Budget(1.0, ledger)
+    assert budget.estimate("plan") == dz.STEP_FLOOR["plan"]
+    ledger.add("opus", "plan", dz.Usage(cost_usd=0.4))
+    ledger.add("haiku", "build", dz.Usage(cost_usd=0.5))
+    assert budget.estimate("plan") == 0.4
+    assert budget.estimate("build") == dz.STEP_FLOOR["build"]  # BrickWright caps a round itself
+    assert budget.remaining == pytest.approx(0.1) and not budget.allows("plan")
+
+
+def test_max_cost_default_is_one_total(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    seen = {}
+
+    def fake_design(request, inventory, **kwargs):
+        seen.update(kwargs)
+        return dz.DesignResult(True, "rec", tmp_path / "build.py", 1, "ok")
+
+    monkeypatch.setattr(dz, "design", fake_design)
+    dz.main(["a tower", "--inventory", str(make_inventory(tmp_path))])
+    assert seen["max_cost"] == 1.5

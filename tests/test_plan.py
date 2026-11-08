@@ -276,3 +276,33 @@ def test_revise_plan_retries_then_passes(image):
 def test_revise_plan_real_call_is_blocked(image):
     with pytest.raises(AssertionError, match="pass a fake instead"):
         pl.revise_plan(pl.Plan.model_validate(VALID), REVIEW, image, None, INVENTORY)
+
+
+# --- Structured output, front and tiles -----------------------------------------
+
+
+def test_plan_and_revise_ask_for_the_plan_schema(image):
+    llm = FakeLLM(json.dumps(VALID), json.dumps(revised_plan()))
+    pl.make_plan("a guitar", INVENTORY, complete=llm)
+    pl.revise_plan(pl.Plan.model_validate(VALID), REVIEW, image, None, INVENTORY, complete=llm)
+    assert [call["response_format"] for call in llm.calls] == [pl.Plan, pl.Plan]
+    assert all(call["max_tokens"] == pl.MAX_TOKENS == 16384 for call in llm.calls)
+
+
+def test_plan_and_revise_prompts_define_front_and_ask_for_tiles(image):
+    llm = FakeLLM(json.dumps(VALID), json.dumps(revised_plan()))
+    pl.make_plan("a guitar", INVENTORY, complete=llm)
+    pl.revise_plan(pl.Plan.model_validate(VALID), REVIEW, image, None, INVENTORY, complete=llm)
+    plan_text = llm.calls[0]["messages"][0]["content"]
+    revise_text = llm.calls[1]["messages"][0]["content"][0]["text"]
+    for text in (plan_text, revise_text):
+        assert pl.ORIENTATION in text and "+y side" in text
+        assert "Cover visible surfaces with tiles (smooth parts with no studs) for a clean look." in text
+
+
+def test_tiles_survive_the_spare_cap():
+    inv = Inventory({**{(p, RED): 5 for p in BIG_IDS}, **{(p, WHITE): 5 for p in BIG_IDS}})
+    spare = pl.spare_set(inv, pl.Plan.model_validate(VALID))
+    assert len(spare) == 40
+    tiles = [key for key in spare if pl.part_kind(pl.part_name(key[0])) == "tile"]
+    assert {part for part, _ in tiles} >= {"3070b", "3069b"}  # 1x1 and 1x2 tiles, both colors

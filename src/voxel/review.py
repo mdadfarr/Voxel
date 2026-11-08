@@ -15,11 +15,11 @@ from typing import Any, Callable
 
 from pydantic import Field, ValidationError, field_validator
 
-from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, image_part, strip_fences
-from .plan import Plan, StrictModel
+from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, image_part, load_json
+from .plan import ORIENTATION, Plan, StrictModel
 
 DEFAULT_REVIEW_MODEL = "claude-opus-5-5"
-MAX_TOKENS = 4096
+MAX_TOKENS = 8192
 
 
 class Verdict(StrictModel):
@@ -88,8 +88,10 @@ def review_prompt(plan: Plan, expansion: str | None) -> str:
     }
     context = f"Detailed description of what was asked for:\n{expansion}\n\n" if expansion else ""
     return (
-        "You review a finished LEGO build. The attached image is its render: front, "
-        "side, top and isometric views of the same build.\n\n"
+        "You review a finished LEGO build. The attached image is its render: four views "
+        "of the same build in a 2x2 grid, front (top left), side (top right), top "
+        "(bottom left) and isometric (bottom right).\n"
+        f"{ORIENTATION}\n\n"
         f"{context}"
         f"The plan the builder followed:\n{plan.model_dump_json(indent=2)}\n\n"
         f"Checklist:\n{checklist}\n\n"
@@ -105,10 +107,7 @@ def review_prompt(plan: Plan, expansion: str | None) -> str:
 
 def parse_review(text: str, plan: Plan) -> Review:
     """Parse and check a review. Raises ValueError with a message meant for the reviewer."""
-    try:
-        data = json.loads(strip_fences(text))
-    except json.JSONDecodeError as err:
-        raise ValueError(f"the reply is not valid JSON: {err}") from None
+    data = load_json(text)
     try:
         result = Review.model_validate(data)
     except ValidationError as err:
@@ -137,6 +136,7 @@ def review(
             parse=lambda text: parse_review(text, plan),
             max_tokens=MAX_TOKENS,
             what="review",
+            schema=Review,
         )
     except ReplyError as err:
         raise ReviewError.from_reply(err) from None

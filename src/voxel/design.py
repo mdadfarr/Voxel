@@ -73,6 +73,7 @@ from .llm import Usage
 from .parts import part_name
 from .plan import (
     DEFAULT_PLAN_MODEL,
+    ORIENTATION,
     UNITS,
     Plan,
     PlanError,
@@ -108,6 +109,10 @@ STEP_GROUP = {  # usage step -> cost line part
 EXPANSION_FILE = "expansion.json"
 REVIEW_FILE = "review.json"
 MAX_REVIEW_ROUNDS = 2
+DEFAULT_MAX_COST = 1.5  # USD for the whole run: expand, plan, revise, every build round, review
+# The least each step is assumed to cost when checking the budget before it. For
+# single calls the largest cost seen for that step in this run is used if higher.
+STEP_FLOOR = {"questions": 0.02, "expand": 0.05, "plan": 0.10, "revise": 0.10, "build": 0.10, "review": 0.05}
 GATE_TIMEOUT = 60.0
 
 
@@ -166,6 +171,7 @@ def build_prompt(
             lines.append(f"{part_id} | {part_name(part_id)} | {color_label(code)} | {inventory.counts[key]}")
         return (
             f"{request}\n\n"
+            f"{ORIENTATION}\n\n"
             "HARD RULE: use ONLY the parts listed below, in those colors, and never more "
             "than the count given. Do not use any other part or color.\n"
             "Format: part id | name | color | count owned\n"
@@ -188,6 +194,7 @@ def build_prompt(
         "its sections give each part of the object with size, position and colors.\n"
         f"Units: x, y, width and depth are in studs; {UNITS}, the same units as "
         "BrickLayer's add() position (x, y, z). A plate-thick step is 1/3 brick.\n"
+        f"{ORIENTATION}\n"
         f"PLAN:\n{plan.model_dump_json(indent=2)}\n\n"
         "HARD RULE: use ONLY the parts listed below (planned parts and spare parts), "
         "in those colors, and never more than the count owned. Do not use any other "
@@ -371,6 +378,8 @@ class DesignResult:
     review_note: str = ""  # why the review was skipped, or that an earlier build was kept
     usage: tuple[dict, ...] = ()  # per model: model, input_tokens, output_tokens, cost_usd, steps
     reused_from: str = ""  # with --from-record: "plan vN and expansion from <id>"
+    max_cost: float = DEFAULT_MAX_COST  # the run's budget
+    budget_note: str = ""  # "ran out before review round 2" when the budget stopped the run
 
     @property
     def cost_usd(self) -> float:
@@ -382,9 +391,11 @@ class UsageLedger:
     """Tokens and cost per (model, step), in order of first use."""
 
     rows: dict[tuple[str, str], Usage] = field(default_factory=dict)
+    largest: dict[str, float] = field(default_factory=dict)  # step -> most one call cost
 
     def add(self, model: str, step: str, usage: Usage) -> None:
         self.rows[(model, step)] = self.rows.get((model, step), Usage()) + usage
+        self.largest[step] = max(self.largest.get(step, 0.0), usage.cost_usd)
 
     def step_cost(self, group: str) -> float:
         return sum(u.cost_usd for (_, step), u in self.rows.items() if STEP_GROUP[step] == group)
@@ -405,6 +416,47 @@ class UsageLedger:
             if step not in row["steps"]:
                 row["steps"].append(step)
         return list(models.values())
+
+
+class BudgetError(Exception):
+    """The budget ran out before any build was made. cost_usd: spent until then."""
+
+    def __init__(self, message: str, cost_usd: float) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
+
+
+@dataclass
+class Budget:
+    """One USD cap for the whole run, checked before each step."""
+
+    total: float
+    ledger: UsageLedger
+
+    @property
+    def spent(self) -> float:
+        return self.ledger.total_cost
+
+    @property
+    def remaining(self) -> float:
+        return self.total - self.spent
+
+    def estimate(self, step: str) -> float:
+        if step == "build":  # BrickWright caps a build round itself, at what is left
+            return STEP_FLOOR[step]
+        return max(STEP_FLOOR[step], self.ledger.largest.get(step, 0.0))
+
+    def allows(self, *steps: str) -> bool:
+        return self.remaining >= sum(self.estimate(step) for step in steps)
+
+    def require(self, step: str, before: str) -> None:
+        """Raise BudgetError if `step` does not fit; for steps before any build."""
+        if not self.allows(step):
+            raise BudgetError(
+                f"the budget (${self.total:.2f}) ran out before {before}: ${self.spent:.3f} "
+                f"spent, ${max(self.remaining, 0):.3f} left. No build was made.",
+                self.spent,
+            )
 
 
 def run_usage(run_report) -> tuple[Usage, bool]:
@@ -553,7 +605,7 @@ def design(
     build_model=None,
     plan_model=DEFAULT_PLAN_MODEL,
     review_model=DEFAULT_REVIEW_MODEL,
-    max_cost=0.5,
+    max_cost=DEFAULT_MAX_COST,
     max_retries=2,
     records_dir=None,
     run=None,
@@ -583,9 +635,15 @@ def design(
     from_record: skip Expand and Plan, and reuse that record's expansion and
     latest plan version (request may then be empty: the record's is used).
 
-    Raises RecordError if from_record cannot be used (before any LLM call), and
-    ExpandError or PlanError if no usable reply comes back; their cost_usd is
-    everything spent until then.
+    max_cost is one budget for the whole run. Before each step Voxel checks what
+    is left; each build round gets the rest as BrickWright's max_cost. When it
+    runs out, the run stops and keeps the last build that passed the gate
+    (DesignResult.budget_note says where it stopped).
+
+    Raises RecordError if from_record cannot be used (before any LLM call),
+    ExpandError or PlanError if no usable reply comes back, and BudgetError if the
+    budget runs out before the first build; their cost_usd is everything spent
+    until then.
     """
     from brickwright.config import Config
     from brickwright.driver.loop import run_agent
@@ -603,6 +661,20 @@ def design(
     config = Config(**kwargs)
 
     ledger = UsageLedger()
+    budget = Budget(max_cost, ledger)
+    budget_note = ""
+
+    def out_of_budget(where: str) -> None:
+        nonlocal budget_note
+        budget_note = f"ran out before {where}"
+        warn(f"the budget (${max_cost:.2f}) {budget_note}; ${budget.spent:.3f} spent")
+
+    def round_config():
+        """This build round's config: BrickWright may spend what is left of the budget."""
+        left = max(budget.remaining, 0.0)
+        return config.model_copy(
+            update={"max_cost": left, "subagent_max_cost": min(config.subagent_max_cost, left)}
+        )
     expansion: Expansion | None = None
     expansion_data: dict | None = None
     reused_from = ""
@@ -625,6 +697,7 @@ def design(
         reused_from = f"plan v{reused.plan_version}" + (" and expansion" if expansion else "") + f" from {from_record}"
     else:
         if use_expand:
+            budget.require("questions", "the questions")
             try:
                 asked = asker(request, inventory, model=expand_model)
             except ExpandError as err:
@@ -632,6 +705,7 @@ def design(
                 raise ExpandError(str(err), ledger.total_cost, err.attempts) from None
             ledger.add(expand_model, "questions", asked.usage)
             answers = collect_answers(asked.questions, ask, interactive=ask_user)
+            budget.require("expand", "the expansion")
             try:
                 expanded = expander(request, answers, inventory, model=expand_model)
             except ExpandError as err:
@@ -640,6 +714,7 @@ def design(
             ledger.add(expand_model, "expand", expanded.usage)
             expansion = expanded.expansion
             expansion_data = expansion_record(request, answers, expansion, ledger.step_cost("expand"))
+        budget.require("plan", "the plan")
         try:
             planned: PlanResult = planner(request, inventory, model=plan_model, expansion=expansion)
         except PlanError as err:
@@ -666,7 +741,7 @@ def design(
     def build_until_gate(record):
         nonlocal rounds
         for attempt in range(1, max_retries + 2):
-            used, known = run_usage(run(record, config))
+            used, known = run_usage(run(record, round_config()))
             ledger.add(build_model, "build", used)
             if not known:
                 warn(
@@ -677,12 +752,16 @@ def design(
             ok, report = gate(record.build_path, inventory_path)
             if ok or attempt > max_retries:
                 return record, ok, report
+            if not budget.allows("build"):
+                out_of_budget(f"gate retry {attempt}")
+                return record, ok, report
             record = new_record(feedback_prompt(gate_problem(report), prompt), record.id)
 
     reviews: list[dict] = []
     review_passed: bool | None = None
     failed_text = note = ""
     kept = None  # (record, report) of the last build that passed the gate
+    budget.require("build", "the first build")
     record = new_record(prompt)
     for review_round in range(1, MAX_REVIEW_ROUNDS + 1):
         record, ok, report = build_until_gate(record)
@@ -693,6 +772,10 @@ def design(
                 (record, report), ok = kept, True
             break
         kept = (record, report)
+        if not budget.allows("review"):
+            out_of_budget(f"review round {review_round}")
+            note, review_passed = "budget ran out", None
+            break
         image, why = renderer(record, config)
         if image is None:
             note, review_passed = why, None
@@ -721,6 +804,9 @@ def design(
         save_reviews(record, reviews)
         if review_passed or review_round == MAX_REVIEW_ROUNDS:
             break
+        if not budget.allows("revise", "build"):  # no point in a plan that cannot be built
+            out_of_budget(f"plan revision {review_round}")
+            break
         try:
             revised = reviser(plan, result.review, image, expansion, inventory, model=plan_model)
         except PlanError as err:
@@ -734,6 +820,9 @@ def design(
             plan_version(len(plans) + 1, f"revised after review round {review_round}", plan, revised.cost_usd)
         )
         prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan))
+        if not budget.allows("build"):
+            out_of_budget(f"the rebuild with plan v{len(plans)}")
+            break
         # A new plan starts from an empty build, not from the shape it replaces.
         record = new_record(feedback_prompt(review_problem(result.review), prompt, new_plan=True))
 
@@ -742,7 +831,13 @@ def design(
     save_json(
         record,
         USAGE_FILE,
-        {"models": usage, "total_cost_usd": ledger.total_cost, "reused_from": reused_from or None},
+        {
+            "models": usage,
+            "total_cost_usd": ledger.total_cost,
+            "max_cost_usd": max_cost,
+            "budget_note": budget_note or None,
+            "reused_from": reused_from or None,
+        },
     )
 
     return DesignResult(
@@ -761,6 +856,8 @@ def design(
         review_note=note,
         usage=tuple(usage),
         reused_from=reused_from,
+        max_cost=max_cost,
+        budget_note=budget_note,
     )
 
 
@@ -780,6 +877,13 @@ def cost_line(result: DesignResult) -> str:
     )
 
 
+def budget_line(result: DesignResult) -> str:
+    line = f"Budget: ${result.cost_usd:.3f} of ${result.max_cost:.2f} used"
+    if result.budget_note:
+        line += f"; {result.budget_note}, kept {result.record_id}"
+    return line
+
+
 def review_line(result: DesignResult) -> str:
     if result.review_passed is None:
         return f"Review: skipped ({result.review_note})" if result.review_note else "Review: not run"
@@ -789,9 +893,10 @@ def review_line(result: DesignResult) -> str:
 
 
 def exit_code(result: DesignResult) -> int:
-    """0: gate passed and review passed or skipped. 2: gate failed. 3: review failed."""
+    """0: gate passed and review passed or skipped. 2: gate failed. 3: review failed.
+    4: the budget ran out before any build passed the gate."""
     if not result.ok:
-        return 2
+        return 4 if result.budget_note else 2
     return 3 if result.review_passed is False else 0
 
 
@@ -816,7 +921,12 @@ def main(argv=None) -> int:
         default=DEFAULT_PLAN_MODEL,
         help=f"model for the planning call (default {DEFAULT_PLAN_MODEL})",
     )
-    parser.add_argument("--max-cost", type=float, default=0.5, help="USD cap per build round")
+    parser.add_argument(
+        "--max-cost",
+        type=float,
+        default=DEFAULT_MAX_COST,
+        help=f"USD cap for the whole run: expand, plan, every build round, review (default {DEFAULT_MAX_COST})",
+    )
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument(
         "--no-questions",
@@ -873,6 +983,10 @@ def main(argv=None) -> int:
         print(f"Error: planning failed. {err}", file=sys.stderr)
         print(f"Cost so far: ${err.cost_usd:.3f}", file=sys.stderr)
         return 1
+    except BudgetError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        print("Run again with a higher --max-cost.", file=sys.stderr)
+        return 4
     print(f"\n{'PASSED' if result.ok else 'FAILED'} the gate (inventory, parts held up) after {result.rounds} round(s).")
     if result.ok:
         print(review_line(result))
@@ -882,6 +996,7 @@ def main(argv=None) -> int:
         print(f"Reused {result.reused_from}.")
     print(cost_line(result))
     print(models_line(result))
+    print(budget_line(result))
     print(f"Build file: {result.build_path}")
     if not result.ok:
         print(result.report)

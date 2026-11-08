@@ -105,3 +105,15 @@ def test_unusable_twice_raises_with_cost(image):
     with pytest.raises(rv.ReviewError) as info:
         rv.review(PLAN, None, image, complete=llm)
     assert info.value.attempts == 2 and info.value.cost_usd == pytest.approx(0.04)
+
+
+def test_review_asks_for_the_review_schema_and_knows_the_layout(image):
+    from voxel.plan import ORIENTATION
+
+    llm = FakeLLM(json.dumps(GOOD))
+    rv.review(PLAN, None, image, complete=llm)
+    call = llm.calls[0]
+    assert call["response_format"] is rv.Review and call["max_tokens"] == 8192
+    text = call["messages"][0]["content"][0]["text"]
+    assert ORIENTATION in text
+    assert "front (top left), side (top right), top (bottom left) and isometric (bottom right)" in text

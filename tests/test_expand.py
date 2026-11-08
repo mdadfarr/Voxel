@@ -221,3 +221,10 @@ def test_real_calls_are_blocked_in_tests():
         ex.ask_questions("an electric guitar", INVENTORY)
     with pytest.raises(AssertionError, match="pass a fake instead"):
         ex.expand("an electric guitar", [], INVENTORY)
+
+
+def test_questions_and_expand_ask_for_their_schemas():
+    llm = FakeLLM(json.dumps({"questions": [COLOR_Q]}), json.dumps(EXPANSION))
+    ex.ask_questions("an electric guitar", INVENTORY, complete=llm)
+    ex.expand("an electric guitar", answers(), INVENTORY, complete=llm)
+    assert [call["response_format"] for call in llm.calls] == [ex.Questions, ex.Expansion]
