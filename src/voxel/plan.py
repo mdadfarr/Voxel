@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 DEFAULT_PLAN_MODEL = "claude-opus-5-5"
 MAX_TOKENS = 16384  # a plan is long; a cut-off reply is incomplete JSON
+PLAN_TIMEOUT = 360.0  # seconds per plan or revise call: a long plan takes a while to write
 MAX_SPARE_ROWS = 40
 UNITS = "z and height are in bricks (1 brick = 3 plates)"
 UNITS_HINT = f"{UNITS}; a plate is 1/3 brick, so use whole numbers or .333 / .667"
@@ -332,6 +333,7 @@ def _plan_call(complete, model, content, parse) -> PlanResult:
             max_tokens=MAX_TOKENS,
             what="plan",
             schema=Plan,
+            timeout=PLAN_TIMEOUT,
         )
     except ReplyError as err:
         raise PlanError.from_reply(err) from None

@@ -114,6 +114,7 @@ def test_review_asks_for_the_review_schema_and_knows_the_layout(image):
     rv.review(PLAN, None, image, complete=llm)
     call = llm.calls[0]
     assert call["response_format"] is rv.Review and call["max_tokens"] == 8192
+    assert call["timeout"] == 180  # every call but plan and revise
     text = call["messages"][0]["content"][0]["text"]
     assert ORIENTATION in text
     assert "front (top left), side (top right), top (bottom left) and isometric (bottom right)" in text

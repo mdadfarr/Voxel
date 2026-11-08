@@ -1118,3 +1118,177 @@ def test_max_cost_default_is_one_total(tmp_path, monkeypatch):
     monkeypatch.setattr(dz, "design", fake_design)
     dz.main(["a tower", "--inventory", str(make_inventory(tmp_path))])
     assert seen["max_cost"] == 1.5
+
+
+# --- API errors: retried, then a clean stop with exit 5 ------------------------
+
+import litellm  # noqa: E402
+
+from voxel import llm  # noqa: E402
+from voxel import plan as pl  # noqa: E402
+from voxel import review as rv  # noqa: E402
+
+
+def api_timeout():
+    return litellm.Timeout(message="Request timed out", model="m", llm_provider="anthropic")
+
+
+def credit_error():
+    return litellm.BadRequestError(
+        message="Your credit balance is too low to access the Anthropic API.", model="m", llm_provider="anthropic"
+    )
+
+
+def scripted(*outcomes):
+    """A fake completion: each call raises or returns the next outcome."""
+    calls = []
+
+    def complete(**kwargs):
+        calls.append(kwargs)
+        outcome = outcomes[len(calls) - 1]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    complete.calls = calls
+    return complete
+
+
+@pytest.fixture
+def no_waits(monkeypatch):
+    seen = []
+    monkeypatch.setattr(llm, "sleep", seen.append)
+    return seen
+
+
+@pytest.fixture
+def fake_seam(monkeypatch):
+    """BrickWright's completion seam, faked: set .complete to the fake completion."""
+    from brickwright.driver import loop
+
+    seam = SimpleNamespace(complete=None)
+    factory = lambda: seam.complete  # noqa: E731
+    monkeypatch.setattr(loop, "litellm_complete", factory)
+    seam.factory = factory
+    return seam
+
+
+def seam_run(seam, outcomes_per_round, cost=0.1):
+    """A stand-in builder that makes one LLM call per round through BrickWright's
+    seam (the fake completion follows that round's script), then writes a 2-brick tower."""
+    from brickwright.driver import loop
+
+    calls, configs = [], []
+
+    def run(record, config):
+        configs.append(config)
+        seam.complete.script = scripted(*outcomes_per_round[len(calls)])
+        complete = loop.litellm_complete()  # what BrickWright's loop does each run
+        calls.append(record.id)
+        complete(model=config.model, timeout=config.request_timeout)
+        record.write_build(BUILD_SRC.format(n=2))
+        return SimpleNamespace(usage=SimpleNamespace(cost_usd=cost))
+
+    run.calls, run.configs = calls, configs
+    return run
+
+
+@pytest.fixture
+def builder_api(fake_seam):
+    """fake_seam whose completion delegates to the script the current round set."""
+
+    def complete(**kwargs):
+        return complete.script(**kwargs)
+
+    fake_seam.complete = complete
+    return fake_seam
+
+
+def test_builder_calls_are_retried_and_the_seam_put_back(builder_api, no_waits, tmp_path):
+    from brickwright.driver import loop
+
+    run = seam_run(builder_api, [[api_timeout(), "reply"]])
+    result = run_design(tmp_path, make_inventory(tmp_path), run)
+    assert result.ok and not result.stopped and dz.exit_code(result) == 0
+    assert no_waits == [5.0]
+    assert run.configs[0].request_timeout == dz.BUILD_CALL_TIMEOUT == 180
+    assert loop.litellm_complete is builder_api.factory  # unwrapped after the run
+
+
+def test_builder_failing_for_good_keeps_the_earlier_build(builder_api, no_waits, tmp_path):
+    # Round 1 passes the gate, the review fails, the plan is revised, and the
+    # rebuild's call hits a credit error: round 1's build is kept, exit 5.
+    run = seam_run(builder_api, [["reply"], [credit_error()]])
+    result = run_design(
+        tmp_path, make_inventory(tmp_path), run,
+        renderer=fake_renderer, reviewer=fake_reviewer([[False, True]]),
+    )
+    assert len(run.calls) == 2 and result.ok and result.record_id == run.calls[0]
+    assert result.stopped == "the API says the credit balance is too low (builder call), in build round 2"
+    assert dz.stopped_line(result) == f"Stopped: {result.stopped}; kept {run.calls[0]}."
+    assert dz.exit_code(result) == 5 and no_waits == []
+    usage = json.loads((tmp_path / "rec" / result.record_id / dz.USAGE_FILE).read_text())
+    assert usage["stopped"] == result.stopped
+
+
+def test_builder_failing_in_the_first_round_keeps_nothing(builder_api, no_waits, tmp_path):
+    run = seam_run(builder_api, [[api_timeout()] * 3])
+    result = run_design(tmp_path, make_inventory(tmp_path), run)
+    assert not result.ok and dz.exit_code(result) == 5
+    assert result.stopped == "the builder call timed out 3 times (180 s each), in build round 1"
+    assert dz.stopped_line(result).endswith("; no build passed the gate.")
+    assert no_waits == [5.0, 15.0]
+
+
+def run_main(tmp_path, monkeypatch, capsys, **design_kwargs):
+    """main() with design() running on fakes (in tmp_path), no real API call."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    real_design = dz.design
+
+    def fake_design(request, inventory, **kwargs):
+        kwargs.update(design_kwargs)
+        kwargs.setdefault("planner", fake_planner())
+        kwargs["use_expand"] = False
+        return real_design(request, inventory, records_dir=tmp_path / "rec", **kwargs)
+
+    monkeypatch.setattr(dz, "design", fake_design)
+    code = dz.main(["a tower", "--inventory", str(make_inventory(tmp_path))])
+    return code, capsys.readouterr().out
+
+
+def test_three_review_timeouts_stop_cleanly_with_the_summary(tmp_path, monkeypatch, capsys, no_waits):
+    api = scripted(api_timeout(), api_timeout(), api_timeout())
+
+    def reviewer(plan, expansion, image, *, model):
+        return rv.review(plan, expansion, image, model=model, complete=api)
+
+    run = fake_run_factory([2])
+    code, out = run_main(tmp_path, monkeypatch, capsys, run=run, renderer=fake_renderer, reviewer=reviewer)
+    assert code == 5 and len(api.calls) == 3 and no_waits == [5.0, 15.0]
+    lines = out.strip().splitlines()
+    assert lines[0] == (
+        "Stopped: the review call timed out 3 times (180 s each), in review round 1; "
+        f"kept {run.calls[0]}."
+    )
+    assert "PASSED the gate" in out and "Review: skipped (the review call failed)" in out
+    assert "Cost: $0.150 (expand $0.000 + plan $0.050 + build $0.100 + review $0.000)" in out
+    assert any(line.startswith("Models: ") for line in lines)
+    assert "Budget: $0.150 of $1.50 used" in out and "Build file:" in out
+    assert "Traceback" not in out
+
+
+def test_a_credit_error_in_the_plan_stops_cleanly(tmp_path, monkeypatch, capsys, no_waits):
+    api = scripted(credit_error())
+
+    def planner(request, inventory, *, model, expansion=None):
+        return pl.make_plan(request, inventory, model=model, expansion=expansion, complete=api)
+
+    run = fake_run_factory([2])
+    code, out = run_main(tmp_path, monkeypatch, capsys, run=run, planner=planner)
+    assert code == 5 and len(api.calls) == 1 and no_waits == [] and run.calls == []
+    lines = out.strip().splitlines()
+    assert lines[0] == "Stopped: the API says the credit balance is too low (plan call); no build passed the gate."
+    assert "the gate" not in "\n".join(lines[1:])
+    assert "Cost: $0.000" in out and "Models: claude-opus-5-5 0 in / 0 out $0.000" in out and "Budget: $0.000 of $1.50 used" in out
+    assert "Build file:" not in out

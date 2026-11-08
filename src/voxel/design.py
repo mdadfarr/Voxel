@@ -41,6 +41,12 @@ check, the gate orders the parts bottom-up into pages of at most 12
 as out/build.unordered.ldr), and runs check_steps on that order as a safety
 check. Parts nothing holds up go back to the builder as a normal retry.
 
+API errors: every call (questions, expand, plan, revise, review and each builder
+call) is retried twice on timeouts, rate limits, connection and server errors.
+Calls time out after 180 s (360 s for plan and revise). A call that still fails,
+or a credit balance too low, stops the run cleanly: the last build that passed
+the gate is kept, the normal summary is printed, and the exit code is 5.
+
 Run it:
     python -m voxel.design "a small red tower" --inventory inventory.json
 """
@@ -53,6 +59,7 @@ import os
 import subprocess
 import sys
 import traceback
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,7 +76,7 @@ from .expand import (
     expand,
 )
 from .inventory import Inventory, PartKey, color_label, color_name, load_inventory
-from .llm import Usage
+from .llm import DEFAULT_TIMEOUT, CallFailed, Usage, call_api
 from .parts import part_name
 from .plan import (
     DEFAULT_PLAN_MODEL,
@@ -114,6 +121,7 @@ DEFAULT_MAX_COST = 1.5  # USD for the whole run: expand, plan, revise, every bui
 # single calls the largest cost seen for that step in this run is used if higher.
 STEP_FLOOR = {"questions": 0.02, "expand": 0.05, "plan": 0.10, "revise": 0.10, "build": 0.10, "review": 0.05}
 GATE_TIMEOUT = 60.0
+BUILD_CALL_TIMEOUT = DEFAULT_TIMEOUT  # seconds per builder call (BrickWright's request_timeout)
 
 
 def load_env(path: str | Path = ".env") -> None:
@@ -364,8 +372,8 @@ def save_reviews(record, reviews: list[dict]) -> Path:
 @dataclass(frozen=True)
 class DesignResult:
     ok: bool  # the kept build passed the gate (inventory, parts held up)
-    record_id: str
-    build_path: Path
+    record_id: str  # "" when the run stopped before any build
+    build_path: Path | None
     rounds: int  # builder runs, over all gate retries and review rounds
     report: str  # the gate report
     expand_cost_usd: float = 0.0
@@ -380,6 +388,7 @@ class DesignResult:
     reused_from: str = ""  # with --from-record: "plan vN and expansion from <id>"
     max_cost: float = DEFAULT_MAX_COST  # the run's budget
     budget_note: str = ""  # "ran out before review round 2" when the budget stopped the run
+    stopped: str = ""  # why an API call stopped the run (after its retries, or no credit)
 
     @property
     def cost_usd(self) -> float:
@@ -469,6 +478,37 @@ def run_usage(run_report) -> tuple[Usage, bool]:
         cost = getattr(u, "known_cost_usd", 0.0) or 0.0
     tokens = [getattr(u, name, 0) or 0 for name in ("prompt_tokens", "completion_tokens")]
     return Usage(int(tokens[0]), int(tokens[1]), float(cost)), known
+
+
+@contextmanager
+def builder_retries():
+    """While open, every BrickWright LLM call goes through call_api: retried on
+    timeouts, rate limits, connection and server errors, CallFailed when it still
+    fails. BrickWright's completion seam (driver.loop.litellm_complete) is
+    wrapped, and put back on exit. Subagents run in the same process, so they
+    are covered too."""
+    from brickwright.driver import loop
+
+    original = loop.litellm_complete
+
+    def retrying_complete():
+        complete = original()
+        return lambda **kwargs: call_api(complete, "builder", **kwargs)
+
+    loop.litellm_complete = retrying_complete
+    try:
+        yield
+    finally:
+        loop.litellm_complete = original
+
+
+def interrupted_usage(record) -> Usage:
+    """What a builder run that raised used: BrickWright saves it in meta.json."""
+    try:
+        meta = record.read_meta()
+    except Exception:
+        return Usage()
+    return run_usage(meta)[0]
 
 
 class RecordError(ValueError):
@@ -644,6 +684,10 @@ def design(
     ExpandError or PlanError if no usable reply comes back, and BudgetError if the
     budget runs out before the first build; their cost_usd is everything spent
     until then.
+
+    An API call that fails for good (after its retries, or no credit) does not
+    raise: the run stops, keeps the last build that passed the gate (none if it
+    stopped earlier) and returns with DesignResult.stopped saying why.
     """
     from brickwright.config import Config
     from brickwright.driver.loop import run_agent
@@ -655,7 +699,7 @@ def design(
     os.environ[INVENTORY_ENV] = str(inventory_path)  # the agent's child processes inherit this
     require_owned_check()
     build_model = build_model or os.environ.get("BRICKWRIGHT_GENERATION_MODEL") or DEFAULT_MODEL
-    kwargs = {"model": build_model, "max_cost": max_cost}
+    kwargs = {"model": build_model, "max_cost": max_cost, "request_timeout": BUILD_CALL_TIMEOUT}
     if records_dir is not None:
         kwargs["records_dir"] = Path(records_dir)
     config = Config(**kwargs)
@@ -663,6 +707,25 @@ def design(
     ledger = UsageLedger()
     budget = Budget(max_cost, ledger)
     budget_note = ""
+    stopped = ""  # set when an API call fails for good
+
+    def no_build(reason: str) -> DesignResult:
+        """An API call stopped the run before any build: nothing to keep."""
+        return DesignResult(
+            ok=False,
+            record_id="",
+            build_path=None,
+            rounds=0,
+            report="",
+            expand_cost_usd=ledger.step_cost("expand"),
+            plan_cost_usd=ledger.step_cost("plan"),
+            build_cost_usd=ledger.step_cost("build"),
+            review_cost_usd=ledger.step_cost("review"),
+            usage=tuple(ledger.by_model()),
+            reused_from=reused_from,
+            max_cost=max_cost,
+            stopped=reason,
+        )
 
     def out_of_budget(where: str) -> None:
         nonlocal budget_note
@@ -703,6 +766,9 @@ def design(
             except ExpandError as err:
                 ledger.add(expand_model, "questions", err.usage)
                 raise ExpandError(str(err), ledger.total_cost, err.attempts) from None
+            except CallFailed as err:
+                ledger.add(expand_model, "questions", err.usage)
+                return no_build(err.reason)
             ledger.add(expand_model, "questions", asked.usage)
             answers = collect_answers(asked.questions, ask, interactive=ask_user)
             budget.require("expand", "the expansion")
@@ -711,6 +777,9 @@ def design(
             except ExpandError as err:
                 ledger.add(expand_model, "expand", err.usage)
                 raise ExpandError(str(err), ledger.total_cost, err.attempts) from None
+            except CallFailed as err:
+                ledger.add(expand_model, "expand", err.usage)
+                return no_build(err.reason)
             ledger.add(expand_model, "expand", expanded.usage)
             expansion = expanded.expansion
             expansion_data = expansion_record(request, answers, expansion, ledger.step_cost("expand"))
@@ -720,6 +789,9 @@ def design(
         except PlanError as err:
             ledger.add(plan_model, "plan", err.usage)
             raise PlanError(str(err), ledger.total_cost, err.attempts) from None
+        except CallFailed as err:
+            ledger.add(plan_model, "plan", err.usage)
+            return no_build(err.reason)
         ledger.add(plan_model, "plan", planned.usage)
         plan = planned.plan
         plans = [plan_version(1, "initial", plan, planned.cost_usd)]
@@ -739,9 +811,19 @@ def design(
     rounds = 0
 
     def build_until_gate(record):
-        nonlocal rounds
+        """(record, gate passed, report). A builder call that fails for good sets
+        `stopped` and returns that round's record as not passed (it is not gated)."""
+        nonlocal rounds, stopped
         for attempt in range(1, max_retries + 2):
-            used, known = run_usage(run(record, round_config()))
+            try:
+                with builder_retries():
+                    run_report = run(record, round_config())
+            except CallFailed as err:
+                ledger.add(build_model, "build", interrupted_usage(record))
+                rounds += 1
+                stopped = f"{err.reason}, in build round {rounds}"
+                return record, False, f"Not checked: {stopped}."
+            used, known = run_usage(run_report)
             ledger.add(build_model, "build", used)
             if not known:
                 warn(
@@ -765,6 +847,10 @@ def design(
     record = new_record(prompt)
     for review_round in range(1, MAX_REVIEW_ROUNDS + 1):
         record, ok, report = build_until_gate(record)
+        if stopped:
+            if kept is not None:
+                (record, report), ok = kept, True
+            break
         if not ok:
             if kept is not None:
                 note = f"the rebuild after the review failed the gate ({record.id}); kept {kept[0].id}"
@@ -787,6 +873,11 @@ def design(
             ledger.add(review_model, "review", err.usage)
             note, review_passed = str(err), None
             warn(f"review skipped: {err}")
+            break
+        except CallFailed as err:
+            ledger.add(review_model, "review", err.usage)
+            stopped = f"{err.reason}, in review round {review_round}"
+            note, review_passed = "the review call failed", None
             break
         ledger.add(review_model, "review", result.usage)
         review_passed = result.review.passed
@@ -814,6 +905,10 @@ def design(
             note = f"plan revision failed, keeping {record.id}: {err}"
             warn(note)
             break
+        except CallFailed as err:
+            ledger.add(plan_model, "revise", err.usage)
+            stopped = f"{err.reason}, in plan revision {review_round}"
+            break
         ledger.add(plan_model, "revise", revised.usage)
         plan = revised.plan
         plans.append(
@@ -836,6 +931,7 @@ def design(
             "total_cost_usd": ledger.total_cost,
             "max_cost_usd": max_cost,
             "budget_note": budget_note or None,
+            "stopped": stopped or None,
             "reused_from": reused_from or None,
         },
     )
@@ -858,6 +954,7 @@ def design(
         reused_from=reused_from,
         max_cost=max_cost,
         budget_note=budget_note,
+        stopped=stopped,
     )
 
 
@@ -892,9 +989,17 @@ def review_line(result: DesignResult) -> str:
     return f"Review: FAILED after {result.review_rounds} round(s):\n{result.review_report}"
 
 
+def stopped_line(result: DesignResult) -> str:
+    kept = f"kept {result.record_id}" if result.ok else "no build passed the gate"
+    return f"Stopped: {result.stopped}; {kept}."
+
+
 def exit_code(result: DesignResult) -> int:
     """0: gate passed and review passed or skipped. 2: gate failed. 3: review failed.
-    4: the budget ran out before any build passed the gate."""
+    4: the budget ran out before any build passed the gate. 5: an API call failed
+    for good (after its retries, or no credit), whatever was kept."""
+    if result.stopped:
+        return 5
     if not result.ok:
         return 4 if result.budget_note else 2
     return 3 if result.review_passed is False else 0
@@ -987,7 +1092,16 @@ def main(argv=None) -> int:
         print(f"Error: {err}", file=sys.stderr)
         print("Run again with a higher --max-cost.", file=sys.stderr)
         return 4
-    print(f"\n{'PASSED' if result.ok else 'FAILED'} the gate (inventory, parts held up) after {result.rounds} round(s).")
+    print_summary(result)
+    return exit_code(result)
+
+
+def print_summary(result: DesignResult) -> None:
+    print()
+    if result.stopped:
+        print(stopped_line(result))
+    if result.record_id:
+        print(f"{'PASSED' if result.ok else 'FAILED'} the gate (inventory, parts held up) after {result.rounds} round(s).")
     if result.ok:
         print(review_line(result))
         if result.review_passed is False and result.review_note:
@@ -997,10 +1111,10 @@ def main(argv=None) -> int:
     print(cost_line(result))
     print(models_line(result))
     print(budget_line(result))
-    print(f"Build file: {result.build_path}")
-    if not result.ok:
+    if result.build_path is not None:
+        print(f"Build file: {result.build_path}")
+    if not result.ok and result.report:
         print(result.report)
-    return exit_code(result)
 
 
 if __name__ == "__main__":

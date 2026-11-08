@@ -6,6 +6,8 @@ import base64
 import json
 import mimetypes
 import re
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -110,6 +112,86 @@ class CutOff(ValueError):
     """The reply hit the output-token limit, so its JSON is incomplete."""
 
 
+# --- API errors: retry what may pass, stop cleanly on the rest -----------------
+
+DEFAULT_TIMEOUT = 180.0  # seconds per call; the plan and revise calls get longer
+RETRY_WAITS = (5.0, 15.0)  # seconds before retry 1 and retry 2
+CREDIT_TEXT = "credit balance is too low"
+sleep = time.sleep  # tests replace this
+
+
+class CallFailed(Exception):
+    """An API call failed for good: still failing after the retries, or no credit.
+    `reason` is one line for the user; `usage` is what the step used before it."""
+
+    def __init__(self, reason: str, usage: Usage = Usage()) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.usage = usage
+        self.cost_usd = usage.cost_usd
+
+
+def _api_error_types() -> tuple[type, tuple[type, ...]]:
+    """(base of every API error, the transient ones worth a retry)."""
+    import litellm
+    import openai
+
+    transient = (
+        litellm.Timeout,
+        litellm.APIConnectionError,
+        litellm.RateLimitError,
+        litellm.InternalServerError,
+        litellm.ServiceUnavailableError,
+    )
+    return openai.APIError, transient
+
+
+def is_credit_error(err: BaseException) -> bool:
+    return CREDIT_TEXT in str(err).lower()
+
+
+def _short(err: BaseException) -> str:
+    text = str(err).strip().splitlines()[0] if str(err).strip() else ""
+    return f"{type(err).__name__}: {text[:200]}" if text else type(err).__name__
+
+
+def call_api(complete: Callable[..., Any], what: str, **kwargs: Any) -> Any:
+    """complete(**kwargs), retried up to len(RETRY_WAITS) times on timeouts, rate
+    limits, connection errors and server errors (5xx), with a wait before each retry.
+
+    Raises CallFailed when the call still fails after the retries, when the API
+    says the credit balance is too low (not retried), or on any other API error
+    (not retried). Other exceptions (bugs) pass through unchanged.
+    """
+    api_error, transient = _api_error_types()
+    attempts = len(RETRY_WAITS) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return complete(**kwargs)
+        except api_error as err:
+            if is_credit_error(err):
+                raise CallFailed(f"the API says the credit balance is too low ({what} call)") from err
+            retryable = isinstance(err, transient) or (getattr(err, "status_code", 0) or 0) >= 500
+            if not retryable:
+                raise CallFailed(f"the {what} call failed: {_short(err)}") from err
+            if attempt == attempts:
+                import litellm
+
+                if isinstance(err, litellm.Timeout):
+                    limit = kwargs.get("timeout")
+                    each = f" ({limit:g} s each)" if isinstance(limit, (int, float)) else ""
+                    raise CallFailed(f"the {what} call timed out {attempts} times{each}") from err
+                raise CallFailed(f"the {what} call failed {attempts} times: {_short(err)}") from err
+            wait = RETRY_WAITS[attempt - 1]
+            print(
+                f"Warning: the {what} call failed ({type(err).__name__}); "
+                f"retry {attempt} of {len(RETRY_WAITS)} in {wait:g} s",
+                file=sys.stderr,
+            )
+            sleep(wait)
+    raise AssertionError("unreachable")
+
+
 def call_with_retry(
     complete: Callable[..., Any],
     *,
@@ -119,6 +201,7 @@ def call_with_retry(
     max_tokens: int,
     what: str,
     schema: type[BaseModel] | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> tuple[Any, Usage, int]:
     """One call; if `parse` raises ValueError, retry once with the error.
 
@@ -128,14 +211,23 @@ def call_with_retry(
     (lengths, minimums, validators) are still checked by `parse`. A reply cut off
     at max_tokens is reported as such, since its JSON is incomplete.
 
+    Each call goes through call_api with `timeout` seconds: API errors are
+    retried there, and a call that fails for good raises CallFailed carrying the
+    usage of the attempts before it.
+
     Returns (parsed value, usage of all attempts, attempts). Raises ReplyError
-    after 2 failures.
+    after 2 unusable replies.
     """
     messages = list(messages)
     extra = {"response_format": schema} if schema is not None else {}
     usage, error = Usage(), ""
     for attempt in (1, 2):
-        response = complete(model=model, messages=messages, max_tokens=max_tokens, **extra)
+        try:
+            response = call_api(
+                complete, what, model=model, messages=messages, max_tokens=max_tokens, timeout=timeout, **extra
+            )
+        except CallFailed as err:
+            raise CallFailed(err.reason, usage) from err.__cause__
         usage += Usage.of(response)
         text = response_text(response)
         try:

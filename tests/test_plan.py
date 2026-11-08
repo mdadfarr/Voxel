@@ -287,6 +287,7 @@ def test_plan_and_revise_ask_for_the_plan_schema(image):
     pl.revise_plan(pl.Plan.model_validate(VALID), REVIEW, image, None, INVENTORY, complete=llm)
     assert [call["response_format"] for call in llm.calls] == [pl.Plan, pl.Plan]
     assert all(call["max_tokens"] == pl.MAX_TOKENS == 16384 for call in llm.calls)
+    assert all(call["timeout"] == pl.PLAN_TIMEOUT == 360 for call in llm.calls)
 
 
 def test_plan_and_revise_prompts_define_front_and_ask_for_tiles(image):

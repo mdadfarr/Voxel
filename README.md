@@ -115,6 +115,16 @@ revision, review) use structured output, so the reply is JSON in the expected
 shape; a reply cut off at the token limit or rejected by the checks is retried
 once with the reason.
 
+API errors do not crash the run. Every call (questions, description, plan,
+revision, review, and each of the builder's calls) is retried up to 2 times,
+after 5 s and then 15 s, when it times out, hits a rate limit, cannot connect,
+or gets a server error. A call times out after 180 s (360 s for the plan and
+revision calls, which write long replies). If a call still fails after the
+retries, or the API says the credit balance is too low (not retried), the run
+stops cleanly: it keeps the last build that passed the gate, prints one line
+with the reason and the normal summary, and exits with code 5:
+`Stopped: the review call timed out 3 times (180 s each), in review round 1; kept <record_id>.`
+
 To compare builder models on the exact same plan, reuse an earlier record:
 
 ```powershell
@@ -130,7 +140,9 @@ plan is checked against your current inventory first. Records made before
 
 Exit codes: 0 when the gate passed and the review passed or was skipped, 2 when
 the gate failed, 3 when the gate passed but the review still failed after 2
-rounds, 4 when the budget ran out before any build passed the gate.
+rounds, 4 when the budget ran out before any build passed the gate, 5 when an
+API call failed for good (after its retries, or no credit), with or without a
+kept build.
 
 Flags:
 
