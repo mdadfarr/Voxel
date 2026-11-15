@@ -1,0 +1,165 @@
+{
+  "source": "runs/20261108-203101-make-me-a-guitar-1c64df97/plan.json",
+  "note": "Built and passed review 8 of 8. Body outline: 129 cells (from the plan's outline_rows).",
+  "sections": [
+    {
+      "name": "body lower layers",
+      "plan_text": "L0 red plates, L1 red plates (black at x 5..7 y 8..12 where the neck spine enters)",
+      "size": {
+        "width": 12,
+        "depth": 14,
+        "height": 0.667
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "RED",
+          "cells": 250
+        }
+      ],
+      "empty": 86
+    },
+    {
+      "name": "body top layer",
+      "plan_text": "L2 red tiles except where pickguard/bridge go; pickguard 65 cells white; bridge red plate 1x4",
+      "size": {
+        "width": 12,
+        "depth": 14,
+        "height": 0.333
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0.667
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "RED",
+          "cells": 64
+        },
+        {
+          "color": "WHITE",
+          "cells": 65
+        }
+      ],
+      "empty": 39
+    },
+    {
+      "name": "neck spine",
+      "plan_text": "L0 black plates x 5..7 from y 12 to y 31 (headstock part is x 5..8 from y 24). L1 black plates from y 8 to y 31",
+      "size": {
+        "width": 3,
+        "depth": 23,
+        "height": 0.667
+      },
+      "position": {
+        "x": 5,
+        "y": 8,
+        "z": 0
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "BLACK",
+          "cells": 98
+        }
+      ],
+      "empty": 40
+    },
+    {
+      "name": "neck and headstock top",
+      "plan_text": "L2 top (24 cells) ... REDDISH_BROWN flat parts available: 3024 x18, 15573 x2, 4073 x5, 3623 x1, 48336 x6 -> exactly 42 cells; nut WHITE plate 1x3",
+      "size": {
+        "width": 3,
+        "depth": 19,
+        "height": 0.333
+      },
+      "position": {
+        "x": 5,
+        "y": 12,
+        "z": 0.667
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "REDDISH_BROWN",
+          "cells": 42
+        },
+        {
+          "color": "WHITE",
+          "cells": 3
+        }
+      ],
+      "empty": 12,
+      "parts": [
+        {
+          "part": "15573",
+          "color": "REDDISH_BROWN",
+          "count": 2
+        },
+        {
+          "part": "4073",
+          "color": "REDDISH_BROWN",
+          "count": 5
+        },
+        {
+          "part": "48336",
+          "color": "REDDISH_BROWN",
+          "count": 6
+        }
+      ]
+    },
+    {
+      "name": "top details",
+      "plan_text": "three black 1x4 tiles; two pearl silver grille tiles 1x2; knobs and tuner posts LIGHT_BLUISH_GRAY 4073 x9; selector BLACK 98138pt5; fret dots WHITE 4073 x8",
+      "size": {
+        "width": 12,
+        "depth": 31,
+        "height": 0.333
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 1
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "BLACK",
+          "cells": 13
+        },
+        {
+          "color": "PEARL_SILVER",
+          "cells": 4
+        },
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 9
+        },
+        {
+          "color": "WHITE",
+          "cells": 8
+        }
+      ],
+      "empty": 338,
+      "parts": [
+        {
+          "part": "4073",
+          "color": "LIGHT_BLUISH_GRAY",
+          "count": 9
+        },
+        {
+          "part": "4073",
+          "color": "WHITE",
+          "count": 8
+        }
+      ]
+    }
+  ]
+}

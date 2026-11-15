@@ -1,0 +1,373 @@
+{
+  "source": "runs/20261109-005715-make-me-a-skull-73b41c51/plan.json",
+  "note": "Never built. Reading 'skin': each 2-stud wall is a visible outer skin 1 stud thick plus a hidden inner skin in any color (the plan: 'use hidden colors on inner halves').",
+  "sections": [
+    {
+      "name": "base",
+      "plan_text": "10 x 11 x 0.333; hidden colors inside, gray where the edge shows",
+      "size": {
+        "width": 10,
+        "depth": 11,
+        "height": 0.333
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 38
+        },
+        {
+          "color": "ANY",
+          "cells": 72
+        }
+      ],
+      "empty": 0
+    },
+    {
+      "name": "lower jaw, outer skin",
+      "plan_text": "LIGHT_BLUISH_GRAY outside",
+      "size": {
+        "width": 8,
+        "depth": 8,
+        "height": 1.667
+      },
+      "position": {
+        "x": 1,
+        "y": 3,
+        "z": 0.333
+      },
+      "fill": "shell",
+      "wall": 1,
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 110
+        }
+      ],
+      "empty": 30
+    },
+    {
+      "name": "lower jaw, inner skin",
+      "plan_text": "use hidden colors on inner halves",
+      "size": {
+        "width": 6,
+        "depth": 6,
+        "height": 1.667
+      },
+      "position": {
+        "x": 2,
+        "y": 4,
+        "z": 0.333
+      },
+      "fill": "shell",
+      "wall": 1,
+      "cells": [
+        {
+          "color": "ANY",
+          "cells": 80
+        }
+      ],
+      "empty": 20
+    },
+    {
+      "name": "face wall, front row",
+      "plan_text": "10 x 2 x 3; gray front wall (2 studs thick where possible); nose x 4..6, z 3.333..4.667; eye sockets x 1..4 and x 6..9, z 4.333..6; black 1 stud behind each opening",
+      "size": {
+        "width": 10,
+        "depth": 1,
+        "height": 3
+      },
+      "position": {
+        "x": 0,
+        "y": 10,
+        "z": 3.333
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 52
+        }
+      ],
+      "empty": 38
+    },
+    {
+      "name": "face wall, back row",
+      "plan_text": "10 x 2 x 3; gray front wall (2 studs thick where possible); nose x 4..6, z 3.333..4.667; eye sockets x 1..4 and x 6..9, z 4.333..6; black 1 stud behind each opening",
+      "size": {
+        "width": 10,
+        "depth": 1,
+        "height": 3
+      },
+      "position": {
+        "x": 0,
+        "y": 9,
+        "z": 3.333
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "BLACK",
+          "cells": 38
+        },
+        {
+          "color": "ANY",
+          "cells": 52
+        }
+      ],
+      "empty": 0
+    },
+    {
+      "name": "teeth and mouth",
+      "plan_text": "8 gray 30069 headlight bricks; a BLACK 1x8 plate row set 1 stud back; gray 1x1 round plates (4073) as upper teeth",
+      "size": {
+        "width": 8,
+        "depth": 2,
+        "height": 1.333
+      },
+      "position": {
+        "x": 1,
+        "y": 9,
+        "z": 2
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 32
+        },
+        {
+          "color": "BLACK",
+          "cells": 8
+        }
+      ],
+      "empty": 24,
+      "parts": [
+        {
+          "part": "30069",
+          "color": "LIGHT_BLUISH_GRAY",
+          "count": 8
+        },
+        {
+          "part": "4073",
+          "color": "LIGHT_BLUISH_GRAY",
+          "count": 8
+        }
+      ]
+    },
+    {
+      "name": "side and back walls above the jaw, outer skin",
+      "plan_text": "10 x 9 ring, z 0.333..6.333; RED above the jaw (z 2..6.667), gray beside the jaw (z 0.333..2); closed walls at every height",
+      "size": {
+        "width": 10,
+        "depth": 9,
+        "height": 4.333
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 2
+      },
+      "fill": "shell",
+      "wall": 1,
+      "cells": [
+        {
+          "color": "RED",
+          "cells": 338
+        }
+      ],
+      "empty": 104
+    },
+    {
+      "name": "side and back walls above the jaw, inner skin",
+      "plan_text": "10 x 9 ring, z 0.333..6.333; RED above the jaw (z 2..6.667), gray beside the jaw (z 0.333..2); closed walls at every height",
+      "size": {
+        "width": 8,
+        "depth": 7,
+        "height": 4.333
+      },
+      "position": {
+        "x": 1,
+        "y": 1,
+        "z": 2
+      },
+      "fill": "shell",
+      "wall": 1,
+      "cells": [
+        {
+          "color": "ANY",
+          "cells": 260
+        }
+      ],
+      "empty": 78
+    },
+    {
+      "name": "back wall beside the jaw, outer skin",
+      "plan_text": "10 x 9 ring, z 0.333..6.333; RED above the jaw (z 2..6.667), gray beside the jaw (z 0.333..2); closed walls at every height",
+      "size": {
+        "width": 10,
+        "depth": 9,
+        "height": 1.667
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0.333
+      },
+      "fill": "shell",
+      "wall": 1,
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 70
+        }
+      ],
+      "empty": 100
+    },
+    {
+      "name": "back wall beside the jaw, inner skin",
+      "plan_text": "10 x 9 ring, z 0.333..6.333; RED above the jaw (z 2..6.667), gray beside the jaw (z 0.333..2); closed walls at every height",
+      "size": {
+        "width": 8,
+        "depth": 7,
+        "height": 1.667
+      },
+      "position": {
+        "x": 1,
+        "y": 1,
+        "z": 0.333
+      },
+      "fill": "shell",
+      "wall": 1,
+      "cells": [
+        {
+          "color": "ANY",
+          "cells": 50
+        }
+      ],
+      "empty": 80
+    },
+    {
+      "name": "ceiling",
+      "plan_text": "10 x 11 x 0.333 full-footprint plate layer; hidden colors inside, gray at the visible edge; brow: front row sticks out to y 12",
+      "size": {
+        "width": 10,
+        "depth": 12,
+        "height": 0.333
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 6.333
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 40
+        },
+        {
+          "color": "ANY",
+          "cells": 80
+        }
+      ],
+      "empty": 0
+    },
+    {
+      "name": "cranium outer ring",
+      "plan_text": "outer ring z 6.667..7.667 red (bricks 3004/3010/3005/5152, or plates)",
+      "size": {
+        "width": 10,
+        "depth": 11,
+        "height": 1
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 6.667
+      },
+      "fill": "shell",
+      "wall": 1,
+      "cells": [
+        {
+          "color": "RED",
+          "cells": 114
+        }
+      ],
+      "empty": 0
+    },
+    {
+      "name": "cranium edge plates",
+      "plan_text": "edges between corners: ... a 2-wide red plate ring",
+      "size": {
+        "width": 10,
+        "depth": 11,
+        "height": 0.333
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 7.667
+      },
+      "fill": "shell",
+      "wall": 2,
+      "cells": [
+        {
+          "color": "RED",
+          "cells": 32
+        }
+      ],
+      "empty": 36
+    },
+    {
+      "name": "cranium edge slopes",
+      "plan_text": "red 15068 curved slopes facing outward",
+      "size": {
+        "width": 10,
+        "depth": 11,
+        "height": 0.667
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 8
+      },
+      "fill": "shell",
+      "wall": 2,
+      "cells": [
+        {
+          "color": "RED",
+          "cells": 64
+        }
+      ],
+      "empty": 72
+    },
+    {
+      "name": "cranium center",
+      "plan_text": "flat center plates + red tiles",
+      "size": {
+        "width": 6,
+        "depth": 7,
+        "height": 0.667
+      },
+      "position": {
+        "x": 2,
+        "y": 2,
+        "z": 7.667
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "RED",
+          "cells": 84
+        }
+      ],
+      "empty": 0
+    }
+  ]
+}

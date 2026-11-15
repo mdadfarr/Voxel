@@ -2,8 +2,10 @@
 
 One LLM call (no tools, no loop) turns the request into a plan: a checklist made
 from the request, the sections of the object, and the parts it needs. The plan
-is checked against the inventory; if it is malformed or uses parts you do not
-own, the call is retried once with the error.
+is checked against the inventory; if it is malformed, uses parts you do not own,
+or needs more fill than its budget (voxel.capacity: plate-cells per color, by wall
+thickness, minus a margin kept for the builder), the call is retried once with
+the error. The planner only ever sees the budget, not the full owned plate-cells.
 
 When the review fails, revise_plan() makes a new plan from the old one, the
 failed items and the render, checked the same way.
@@ -21,11 +23,12 @@ import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 import bricklayer as bl
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from .capacity import ANY, CAPACITY_RULES, capacity_table, check_capacity
 from .inventory import Inventory, PartKey, color_name, key_label
 from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, image_part, load_json
 from .parts import SPARE_KINDS, part_kind, part_name, part_size
@@ -116,12 +119,35 @@ class Position(StrictModel):
         return bricks(value)
 
 
+class CellCount(StrictModel):
+    """Plate-cells (1 stud x 1 stud x 1 plate) a section fills with one color."""
+
+    color: str = Field(description='a Color name like RED, or "ANY" for cells that cannot be seen')
+    cells: int = Field(gt=0)
+
+    @field_validator("color")
+    @classmethod
+    def _known_color(cls, value: str) -> str:
+        name = value.strip().upper()
+        if name != ANY and name not in bl.Color.__members__:
+            raise ValueError(f'unknown color {value!r} (use a Color name like RED, or "ANY")')
+        return name
+
+
 class Section(StrictModel):
     name: str
     size: Size
     position: Position
     colors: list[str] = Field(min_length=1)
     parts: list[PlanPart] = Field(min_length=1)
+    # The capacity fields (voxel.capacity). Optional so plans made before the check
+    # still load; parse_plan requires them in every new plan.
+    fill: Literal["solid", "shell"] | None = Field(
+        default=None, description="solid: the whole box; shell: only its four walls"
+    )
+    wall: int = Field(default=1, ge=1, description="studs; wall thickness of a shell")
+    empty: int = Field(default=0, ge=0, description="plate-cells of the box or ring left open")
+    cells: list[CellCount] | None = None
 
     @field_validator("colors")
     @classmethod
@@ -241,6 +267,10 @@ EXAMPLE = {
             "position": {"x": 0, "y": 0, "z": 0},
             "colors": ["RED"],
             "parts": [{"part": "3001", "color": "RED", "count": 8}],
+            "fill": "solid",
+            "wall": 1,
+            "empty": 0,
+            "cells": [{"color": "RED", "cells": 192}],
         }
     ],
     "parts": [{"part": "3001", "color": "RED", "count": 8}],
@@ -277,7 +307,14 @@ def plan_format_and_rules(inventory: Inventory) -> str:
         "request names (colors, parts of the object).\n"
         "- sections: the parts of the object (for a guitar: body, neck, headstock). Each has "
         "name, size {width, depth in studs; height in bricks}, position {x, y in studs; "
-        "z in bricks above the ground}, colors, and the parts it uses as {part, color, count}.\n"
+        "z in bricks above the ground}, colors, and the parts it uses as {part, color, count}. "
+        "Each section also says how much it fills, in plate-cells (1 stud x 1 stud x 1 plate): "
+        'fill ("solid": the whole box; "shell": only its four walls, `wall` studs thick, open '
+        "at the top and bottom), cells (the plate-cells per color as {color, cells}; use color "
+        '"ANY" for cells that cannot be seen from outside) and empty (plate-cells of the box '
+        "or ring left open: openings, cutaways). cells + empty must equal the volume: a solid "
+        "is width x depth x height x 3; a shell is its ring of cells x height x 3. Split a "
+        "section when its parts differ in wall thickness or in whether they can be seen.\n"
         "- parts: every {part, color, count} the whole plan uses, totalled over all sections.\n\n"
         "Rules:\n"
         f"- Units: x, y, width and depth are in studs; {UNITS_HINT}. This is the unit "
@@ -288,7 +325,10 @@ def plan_format_and_rules(inventory: Inventory) -> str:
         "- Use shaped parts (slopes, curved, round, tiles) for outlines and curves, not only "
         "plain bricks.\n"
         f"- {TILES_RULE}\n"
-        "- Follow the size and proportions in the description, if one is given.\n\n"
+        "- Follow the size and proportions in the description, if one is given.\n"
+        f"- {CAPACITY_RULES} A plan that does not fit is rejected.\n\n"
+        "Plate-cells you may plan with, in plain bricks and plates:\n"
+        f"{capacity_table(inventory)}\n\n"
         f"Example of the shape:\n{json.dumps(EXAMPLE, indent=2)}\n\n"
         "Inventory (part id | name | color | count owned):\n" + "\n".join(lines)
     )
@@ -320,6 +360,9 @@ def parse_plan(text: str, inventory: Inventory, expansion: Expansion | None = No
     errors = plan_errors(plan, inventory)
     if errors:
         raise ValueError("the plan uses parts you do not own:\n" + "\n".join(f"- {e}" for e in errors))
+    capacity = check_capacity(plan.model_dump(), inventory)
+    if not capacity.ok:
+        raise ValueError("the plan needs more than your budget of parts:\n" + capacity.report())
     return plan
 
 

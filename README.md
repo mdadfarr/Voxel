@@ -55,6 +55,36 @@ answers, description and features are saved as `expansion.json` in the record
 folder. Both calls see a short inventory summary (pieces and shaped parts per
 color), not the full part list.
 
+Before any builder turn, the plan goes through a capacity check
+(`voxel.capacity`, no LLM): can the parts you own fill its shapes at all? The
+unit is a plate-cell (1 stud x 1 stud x 1 plate). Each section says how it is
+filled: `fill` (`solid`, or `shell` with a `wall` thickness), `cells` (plate-cells
+per color; `ANY` for cells that cannot be seen) and `empty` (openings). Code
+computes the volume from the section's size, and `cells + empty` must equal it.
+Fill is counted from plain bricks and plates only; tiles and slopes count for one
+top per column, where no other section sits on it; any other part counts only
+where a section names it in `parts`. A wall N studs thick only takes parts at
+most N wide, and a part taller than the section does not fit. A plan that needs
+more than you own is sent back to the planner with the numbers
+(`LIGHT_BLUISH_GRAY: short by 448 plate-cells ...`), through the same one retry
+as a malformed plan. Passing the check does not prove the plan can be built.
+
+Two margins keep room for the builder (seams, supports, fixes), both rounded
+down:
+
+- Planner margin, 15% (`VOXEL_PLANNER_MARGIN`): the planner only ever sees the
+  plate-cells you own minus 15%, in the table in its prompt and as "your budget"
+  in the check's messages. It never sees the full plate-cell numbers.
+- Checker margin, 5% (`VOXEL_CHECKER_MARGIN`): the check rejects a plan that
+  needs more than the plate-cells you own minus 5%. So a plan a little over the
+  planner's budget still passes.
+
+The part list in the prompt (part id and count) and the special parts a section
+names stay exact. The builder still gets and may use everything you own, and the
+`only_owned_parts` check uses the full counts. Run the check by hand with
+`python -m voxel.capacity plan.json` (`--checker-margin`, `--planner-margin`), or
+`--table` for the planner's table.
+
 Then one planning call turns the request into a plan: a
 checklist, the sections of the object (size, position, colors, parts) and the
 owned parts it needs. The plan uses BrickLayer's units: x, y, width and depth

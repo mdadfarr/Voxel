@@ -115,6 +115,10 @@ TOWER_PLAN = {
             "position": {"x": 0, "y": 0, "z": 0},
             "colors": ["RED"],
             "parts": [{"part": "3001", "color": "RED", "count": 2}],
+            "fill": "solid",
+            "wall": 1,
+            "empty": 0,
+            "cells": [{"color": "RED", "cells": 144}],
         }
     ],
     "parts": [{"part": "3001", "color": "RED", "count": 2}],

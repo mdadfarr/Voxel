@@ -15,7 +15,7 @@ INVENTORY = Inventory(
         ("3001", RED): 8,  # Brick 2 x 4 (planned)
         ("3020", WHITE): 2,  # Plate 2 x 4 (planned)
         ("3023", RED): 4,  # Plate 1 x 2 -> spare
-        ("3003", WHITE): 3,  # Brick 2 x 2 -> spare
+        ("3003", WHITE): 4,  # Brick 2 x 2 -> spare (and room for the capacity margin)
         ("3039", RED): 2,  # Slope in a plan color -> spare
         ("3001", BLUE): 6,  # basic, but the plan has no blue -> not spare
     }
@@ -30,6 +30,10 @@ VALID = {
             "position": {"x": 0, "y": 0, "z": 0},
             "colors": ["RED"],
             "parts": [{"part": "3001", "color": "RED", "count": 4}],
+            "fill": "solid",
+            "wall": 1,
+            "empty": 0,
+            "cells": [{"color": "RED", "cells": 144}],
         },
         {
             "name": "neck",
@@ -37,6 +41,10 @@ VALID = {
             "position": {"x": 1, "y": 2, "z": 6},
             "colors": ["WHITE"],
             "parts": [{"part": "3020", "color": "WHITE", "count": 2}],
+            "fill": "solid",
+            "wall": 1,
+            "empty": 0,
+            "cells": [{"color": "WHITE", "cells": 48}],
         },
     ],
     "parts": [
@@ -132,7 +140,7 @@ def test_more_than_owned_is_an_error():
 
 def test_spare_set_has_basic_parts_in_plan_colors():
     plan = pl.Plan.model_validate(VALID)
-    assert pl.spare_set(INVENTORY, plan) == {("3003", WHITE): 3, ("3023", RED): 4, ("3039", RED): 2}
+    assert pl.spare_set(INVENTORY, plan) == {("3003", WHITE): 4, ("3023", RED): 4, ("3039", RED): 2}
 
 
 # --- Units: z and height in bricks ------------------------------------------------
@@ -235,6 +243,7 @@ def image(tmp_path):
 def revised_plan():
     data = copy.deepcopy(VALID)
     data["sections"][0]["size"] = {"width": 4, "depth": 2, "height": 1.333}
+    data["sections"][0]["cells"] = [{"color": "RED", "cells": 32}]  # 4 x 2 studs x 4 plates
     return data
 
 
