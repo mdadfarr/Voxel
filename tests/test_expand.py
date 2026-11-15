@@ -137,7 +137,8 @@ def test_expand_valid():
     prompt = llm.prompt()
     assert "Which guitar style? Les Paul" in prompt
     assert "height in BRICKS (1 brick = 3 plates)" in prompt
-    assert "not a mini model" in prompt and "body is about a third of the height" in prompt
+    assert "not a mini model" not in prompt and "body is about a third of the height" in prompt
+    assert "uses 70 to 100% of its budget" in prompt  # the size comes from the budget (voxel.sizing)
     assert "pickguard, pickups, frets, tuning pegs" in prompt
     assert "shaped parts (slopes, curved bricks, round tiles and plates)" in prompt
     assert "RED: 42 pieces" in prompt

@@ -44,7 +44,7 @@ python -m voxel.design "a small red tower" --inventory inventory.json --max-cost
 The run goes Expand -> Plan -> Build -> Review.
 
 First, Voxel asks you at most 3 questions about what the request leaves open
-(type, colors, size, key features). Each shows its default in brackets; press
+(type, colors, key features; never size). Each shows its default in brackets; press
 Enter to take it. Color questions only offer colors you own at least 20 pieces
 of. Then one call writes a detailed description: overall size (width and depth
 in studs, height in bricks, 1 brick = 3 plates), proportions between the parts,
@@ -84,6 +84,24 @@ names stay exact. The builder still gets and may use everything you own, and the
 `only_owned_parts` check uses the full counts. Run the check by hand with
 `python -m voxel.capacity plan.json` (`--checker-margin`, `--planner-margin`), or
 `--table` for the planner's table.
+
+You are not asked how big the model should be. The size comes from the parts you
+own (`voxel.sizing`): the description and the plan get the planner's budget table
+and one rule, "choose the overall size so that the color you use most, relative
+to its budget, uses 70 to 100% of its budget". After a plan passes the capacity
+check, code measures the utilization of each color: the plate-cells the plan
+fills with it, divided by the planner's budget for it, where that color is
+tightest (thin walls only count the parts that fit them). If the tightest color
+is under `VOXEL_MIN_FILL` (60) percent, the plan goes back once with
+"Too small: ...". This one size retry is separate from the retry for an unusable
+plan. If the plan is still too small, it is kept and a warning is printed. There
+is no upper limit other than the capacity check.
+
+If your request already says a size ("a small guitar", "30 studs tall"), that
+size is kept and not checked. After planning, one line is printed and saved in
+`plan.json` as `sizing`:
+`Size: 10 x 11 studs x 7.33 bricks, limited by RED (78% of budget).`
+`python -m voxel.capacity plan.json` prints the same numbers per color.
 
 Then one planning call turns the request into a plan: a
 checklist, the sections of the object (size, position, colors, parts) and the

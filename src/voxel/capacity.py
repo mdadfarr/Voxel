@@ -58,6 +58,11 @@ studs that do not line up).
 
 Run it on a plan file:
     python -m voxel.capacity runs/<record_id>/plan.json [--inventory inventory.json]
+After the check it prints the utilization per color, the tightest color, the
+"Size:" line and "Too small" if it applies (voxel.sizing), and saves that as
+"sizing" in the plan file. --request "<text>"
+gives the user's request: if it states a size, the size is not checked. Exit
+code 0: fits; 1: does not fit; 3: fits, but is too small.
 Print the table the planner gets:
     python -m voxel.capacity --table [--inventory inventory.json]
 The first takes --checker-margin and --planner-margin, the second --planner-margin
@@ -447,24 +452,49 @@ def shortfall(
 ) -> Shortfall | None:
     """The shortfall of one color within one limit, or None when it fits the
     checker's limit (owned minus `checker` percent)."""
+    need, allowed_stack, allowed_tops, inside = need_and_budget(rows, demands, color, thin, layers, checker)
+    limit = allowed_stack + allowed_tops
+    if need == 0 or need <= limit:
+        return None
+    _, stack, tops, _ = need_and_budget(rows, demands, color, thin, layers, planner)
+    by_size = sorted(((d.name, d.need(color)) for d in inside), key=lambda item: (-item[1], item[0]))
+    return Shortfall(color, thin, layers, need, stack, tops, tuple(by_size), limit)
+
+
+def need_and_budget(
+    rows: Sequence[Stock], demands: Sequence[Demand], color: str, thin: int, layers: int, margin: float
+) -> tuple[int, int, int, list[Demand]]:
+    """(plate-cells needed, stackable cells allowed, tops allowed, the sections) for one
+    color within one width and height limit, with `margin` percent held back."""
     inside = [d for d in demands if d.thin <= thin and d.layers <= layers and d.need(color) > 0]
     need = sum(d.need(color) for d in inside)
-    if need == 0:
-        return None
     code = _code(color)
     top_layers = tallest_top(rows, code, thin, layers)
     room = sum(min(d.need(color), d.tops * min(d.layers, top_layers)) for d in inside)
+    stack = budget(rows, code, thin, layers, top=False, margin=margin)
+    return need, stack, min(budget(rows, code, thin, layers, top=True, margin=margin), room), inside
 
-    def allowed(margin: float) -> tuple[int, int]:
-        stack = budget(rows, code, thin, layers, top=False, margin=margin)
-        return stack, min(budget(rows, code, thin, layers, top=True, margin=margin), room)
 
-    limit = sum(allowed(checker))
-    if need <= limit:
-        return None
-    stack, tops = allowed(planner)
-    by_size = sorted(((d.name, d.need(color)) for d in inside), key=lambda item: (-item[1], item[0]))
-    return Shortfall(color, thin, layers, need, stack, tops, tuple(by_size), limit)
+def limits(demands: Sequence[Demand]) -> list[tuple[int, int]]:
+    """Every (width, height) limit worth checking: each section's width with each height."""
+    return sorted({(t, h) for t in {d.thin for d in demands} for h in {d.layers for d in demands}})
+
+
+def plan_demands(plan: Mapping) -> list[Demand]:
+    """The demands of a plan whose every section has the capacity fields, with the
+    exposed tops set. Raises ValueError naming the first section that is wrong."""
+    sections = plan.get("sections")
+    if not isinstance(sections, Sequence) or isinstance(sections, str) or not sections:
+        raise ValueError("the plan has no sections")
+    demands = []
+    for n, section in enumerate(sections, start=1):
+        if not isinstance(section, Mapping):
+            raise ValueError(f"section {n}: not an object")
+        try:
+            demands.append(section_demand(section))
+        except ValueError as err:
+            raise ValueError(f"section {section.get('name', n)!r}: {err}") from None
+    return exposed_tops(demands)
 
 
 def check_demands(
@@ -481,10 +511,9 @@ def check_demands(
     planner = max(planner_margin(planner), margin)
     rows = stock(inventory)
     colors = sorted({c for d in demands for c in d.cells if c != ANY}) + [ALL]
-    limits = sorted({(t, h) for t in {d.thin for d in demands} for h in {d.layers for d in demands}})
     worst: dict[str, Shortfall] = {}
     for color in colors:
-        for thin, layers in limits:
+        for thin, layers in limits(demands):
             found = shortfall(rows, demands, color, thin, layers, margin, planner)
             if found and (color not in worst or found.over > worst[color].over):
                 worst[color] = found
@@ -575,6 +604,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--inventory", default="inventory.json")
     parser.add_argument("--table", action="store_true", help="print the plate-cells to plan with, per color")
     parser.add_argument(
+        "--request",
+        default="",
+        help="the user's request: if it states a size (small, tall, 30 studs), the size is not checked",
+    )
+    parser.add_argument("--no-save", action="store_true", help='do not write "sizing" into the plan file')
+    parser.add_argument(
         "--planner-margin",
         type=float,
         default=None,
@@ -607,7 +642,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     result = check_capacity(plan, inventory, margin=checker, planner=planner)
     print(result.report())
-    return 0 if result.ok else 1
+    if result.errors:  # the sections' numbers are wrong: nothing to measure yet
+        return 1
+    from .sizing import measure, states_size  # here: sizing imports this module
+
+    measured = measure(plan, inventory, user_size=states_size(args.request), planner=planner)
+    print(measured.report())
+    if not result.ok:
+        return 1
+    if not args.no_save:
+        plan = {**plan, "sizing": measured.sizing.to_json()}
+        Path(args.plan).write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+        print(f'Saved as "sizing" in {args.plan}.')
+    return 3 if measured.sizing.problem else 0
 
 
 if __name__ == "__main__":

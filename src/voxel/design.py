@@ -3,8 +3,11 @@
 Flow: Expand -> Plan -> Build -> Review.
 
 Expand (voxel.expand, Opus): Voxel asks you at most 3 questions about what the
-request leaves open (empty answer = the default shown in brackets), then writes
-a detailed description: size, proportions, colors per part and key features.
+request leaves open (empty answer = the default shown in brackets; never about
+size), then writes a detailed description: size, proportions, colors per part
+and key features. The size comes from the parts you own (voxel.sizing): as big as
+the tightest color's budget allows; a plan that is too small is sent back once. A request that states a size keeps it. After planning a
+"Size: ..." line is printed, and saved in plan.json as "sizing".
 It is saved as expansion.json in the record folder. --no-questions uses all
 defaults; --no-expand skips the step and plans from the short request.
 --from-record <id> skips Expand and Plan and reuses that record's expansion and
@@ -690,13 +693,13 @@ def plan_version(version: int, reason: str, plan: Plan, cost_usd: float) -> dict
         "reason": reason,
         "record_id": None,
         "cost_usd": cost_usd,
-        "plan": plan.model_dump(),
+        "plan": plan.model_dump(exclude_none=True),
     }
 
 
 def save_plan(record, plan: Plan) -> Path:
     path = Path(record.path) / PLAN_FILE
-    path.write_text(plan.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    path.write_text(plan.model_dump_json(indent=2, exclude_none=True) + "\n", encoding="utf-8")
     return path
 
 
@@ -867,6 +870,8 @@ def design(
         ledger.add(plan_model, "plan", planned.usage)
         plan = planned.plan
         plans = [plan_version(1, "initial", plan, planned.cost_usd)]
+    if plan.sizing is not None:
+        print(plan.sizing.line)  # "Size: ..." (voxel.sizing); also saved in plan.json
     prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan), expert=use_expert)
     expansion_text = expansion.as_text() if expansion is not None else None
 
@@ -985,6 +990,8 @@ def design(
             break
         ledger.add(plan_model, "revise", revised.usage)
         plan = revised.plan
+        if plan.sizing is not None:
+            print(plan.sizing.line)
         plans.append(
             plan_version(len(plans) + 1, f"revised after review round {review_round}", plan, revised.cost_usd)
         )

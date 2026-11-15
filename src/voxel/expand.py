@@ -3,31 +3,36 @@
 Two LLM calls (no tools, no loop):
 
 1. ask_questions(): at most 3 questions about what the request leaves open
-   (type, colors, size, key features), each with a short default answer. Color
-   questions may only offer colors you own enough of.
+   (type, colors, key features), each with a short default answer. Color
+   questions may only offer colors you own enough of. Never about size: the size
+   comes from the parts owned (voxel.sizing), or from the request if it states one.
 2. expand(): turns the request and the answers into a detailed description:
    overall size, proportions, colors per part, the key features a person would
    recognize, and shaped parts for outlines and curves. The features are also
    returned as a list, so the planner can turn each into a checklist item.
 
 The model sees a short inventory summary (pieces per color, and shaped parts
-per color), not the full part list. Each call is retried once if its reply is
+per color), not the full part list. expand() also gets the planner's budget
+table (voxel.capacity) and the size rule, to choose the overall size. Each call is retried once if its reply is
 unusable.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 
+from .capacity import CAPACITY_RULES, capacity_table
 from .inventory import Inventory, color_name
 from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, load_json
 from .parts import SHAPES, part_name, shape_kind
 from .plan import StrictModel
+from .sizing import size_rule, states_size
 
 DEFAULT_EXPAND_MODEL = "claude-opus-5-5"
 MAX_QUESTIONS = 3
@@ -133,6 +138,17 @@ def question_errors(questions: list[Question], inventory: Inventory) -> list[str
     return errors
 
 
+_SIZE_QUESTION = re.compile(
+    r"\b(size|sized|scale|dimensions?|studs|how\s+(big|large|small|tall|long|wide|high|many\s+(studs|bricks)))\b",
+    re.IGNORECASE,
+)
+
+
+def is_size_question(question: Question) -> bool:
+    """A question about size, scale or how big: never asked (voxel.sizing decides)."""
+    return bool(_SIZE_QUESTION.search(f"{question.id.replace('_', ' ')} {question.text}"))
+
+
 def questions_prompt(request: str, inventory: Inventory) -> str:
     example = {
         "questions": [
@@ -149,9 +165,11 @@ def questions_prompt(request: str, inventory: Inventory) -> str:
         "You help turn a short LEGO build request into a detailed one.\n\n"
         f"Request: {request}\n\n"
         f"Ask the user at most {MAX_QUESTIONS} short questions about things the request "
-        "leaves open and that change how the model looks: its type or style, colors, size, "
+        "leaves open and that change how the model looks: its type or style, colors, "
         "key features. Do not ask about what the request already says. If nothing "
-        "important is open, ask nothing.\n\n"
+        "important is open, ask nothing.\n"
+        "NEVER ask about size, scale or how big the model should be: the size is worked "
+        "out from the parts the user owns.\n\n"
         "Each question has: id (short snake_case), text, kind (\"color\" for a color "
         "choice, else \"other\"), options (a few short choices, may be empty), and default "
         "(a short, sensible answer used when the user just presses Enter).\n"
@@ -170,6 +188,7 @@ def parse_questions(text: str, inventory: Inventory) -> list[Question]:
         questions = Questions.model_validate(data).questions
     except ValidationError as err:
         raise ValueError(f"the JSON does not match the questions shape:\n{err}") from None
+    questions = [q for q in questions if not is_size_question(q)]  # never ask about size
     errors = question_errors(questions, inventory)
     if errors:
         raise ValueError("\n".join(f"- {e}" for e in errors))
@@ -228,8 +247,7 @@ def expand_prompt(request: str, answers: list[Answer], inventory: Inventory) -> 
         f"The user's answers:\n{answered}\n\n"
         "The description must give:\n"
         "- Overall size: width and depth in studs, height in BRICKS (1 brick = 3 plates). "
-        "Big enough to show detail: not a mini model. It must still be buildable from "
-        "the pieces below.\n"
+        "See the size rule and the budget table below.\n"
         "- Realistic proportions between the parts of the object. For a guitar: the body "
         "is about a third of the height, the neck is long and thin, the headstock is small.\n"
         "- The colors of each part, only from the colors below.\n"
@@ -239,6 +257,10 @@ def expand_prompt(request: str, answers: list[Answer], inventory: Inventory) -> 
         "tiles and plates), not only plain bricks.\n\n"
         "Owned colors (pieces in total, and shaped parts):\n"
         f"{inventory_summary(inventory)}\n\n"
+        f"{size_rule(states_size(request))}\n"
+        f"{CAPACITY_RULES}\n"
+        "Plate-cells you may plan with, in plain bricks and plates:\n"
+        f"{capacity_table(inventory)}\n\n"
         "Reply with ONE JSON object and nothing else, with keys description (text), "
         "size {width, depth in studs; height in BRICKS}, and features (1 to "
         f"{MAX_FEATURES} short items, each something you can check by looking at the "

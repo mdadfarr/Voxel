@@ -20,6 +20,7 @@ basic and shaped parts in the plan's colors, so it has room to fix things.
 from __future__ import annotations
 
 import json
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,8 +31,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .capacity import ANY, CAPACITY_RULES, capacity_table, check_capacity
 from .inventory import Inventory, PartKey, color_name, key_label
-from .llm import HasUsage, ReplyError, StepError, call_with_retry, default_complete, image_part, load_json
+from .llm import (
+    CallFailed,
+    HasUsage,
+    ReplyError,
+    StepError,
+    call_with_retry,
+    default_complete,
+    image_part,
+    load_json,
+)
 from .parts import SPARE_KINDS, part_kind, part_name, part_size
+from .sizing import measure, size_rule, states_size
 
 if TYPE_CHECKING:
     from .expand import Expansion
@@ -157,10 +168,25 @@ class Section(StrictModel):
         return values
 
 
+class Sizing(StrictModel):
+    """How big the plan is and what limits it (voxel.sizing). Filled in by code
+    after the capacity check, never by the planner."""
+
+    width: int = Field(description="studs")
+    depth: int = Field(description="studs")
+    height: float = Field(description="bricks")
+    limited_by: str = Field(description="the color that uses the largest share of its budget")
+    utilization: int = Field(description="percent of that color's budget")
+    user_size: bool = Field(description="the request said the size, so it was not checked")
+    problem: str = Field(default="", description='"Too small ...", else empty')
+    line: str = Field(description='the "Size: ..." line')
+
+
 class Plan(StrictModel):
     checklist: list[str] = Field(min_length=1)
     sections: list[Section] = Field(min_length=1)
     parts: list[PlanPart] = Field(min_length=1)
+    sizing: Sizing | None = None
 
     @field_validator("checklist")
     @classmethod
@@ -252,6 +278,8 @@ class PlanResult(HasUsage):
     attempts: int
     input_tokens: int = 0
     output_tokens: int = 0
+    size_retried: bool = False  # the planner was sent back once because the plan was too small
+    size_warning: str = ""  # the size problem the kept plan still has
 
 
 EXAMPLE = {
@@ -293,8 +321,9 @@ def expansion_rules(expansion: Expansion) -> str:
     )
 
 
-def plan_format_and_rules(inventory: Inventory) -> str:
-    """The reply format, rules and inventory, shared by make_plan and revise_plan."""
+def plan_format_and_rules(inventory: Inventory, user_size: bool = False) -> str:
+    """The reply format, rules and inventory, shared by make_plan and revise_plan.
+    user_size: the request states the size, so the plan keeps it."""
     lines = [
         f"{part_id} | {part_name(part_id)} | {color_name(code)} | {n}"
         for (part_id, code), n in sorted(inventory.counts.items())
@@ -315,7 +344,8 @@ def plan_format_and_rules(inventory: Inventory) -> str:
         "or ring left open: openings, cutaways). cells + empty must equal the volume: a solid "
         "is width x depth x height x 3; a shell is its ring of cells x height x 3. Split a "
         "section when its parts differ in wall thickness or in whether they can be seen.\n"
-        "- parts: every {part, color, count} the whole plan uses, totalled over all sections.\n\n"
+        "- parts: every {part, color, count} the whole plan uses, totalled over all sections.\n"
+        'Leave out "sizing": code fills it in.\n\n'
         "Rules:\n"
         f"- Units: x, y, width and depth are in studs; {UNITS_HINT}. This is the unit "
         "BrickLayer's add() uses.\n"
@@ -326,7 +356,8 @@ def plan_format_and_rules(inventory: Inventory) -> str:
         "plain bricks.\n"
         f"- {TILES_RULE}\n"
         "- Follow the size and proportions in the description, if one is given.\n"
-        f"- {CAPACITY_RULES} A plan that does not fit is rejected.\n\n"
+        f"- {CAPACITY_RULES} A plan that does not fit is rejected.\n"
+        f"- {size_rule(user_size)}\n\n"
         "Plate-cells you may plan with, in plain bricks and plates:\n"
         f"{capacity_table(inventory)}\n\n"
         f"Example of the shape:\n{json.dumps(EXAMPLE, indent=2)}\n\n"
@@ -339,12 +370,16 @@ def plan_prompt(request: str, inventory: Inventory, expansion: Expansion | None 
         "You plan LEGO builds. A separate builder will follow your plan, so be concrete.\n\n"
         f"Request: {request}\n\n"
         + (expansion_rules(expansion) if expansion is not None else "")
-        + plan_format_and_rules(inventory)
+        + plan_format_and_rules(inventory, states_size(request))
     )
 
 
-def parse_plan(text: str, inventory: Inventory, expansion: Expansion | None = None) -> Plan:
-    """Parse and check a plan. Raises ValueError with a message meant for the planner."""
+def parse_plan(
+    text: str, inventory: Inventory, expansion: Expansion | None = None, *, user_size: bool = False
+) -> Plan:
+    """Parse and check a plan, and fill in its `sizing` (voxel.sizing). Raises
+    ValueError with a message meant for the planner. A plan whose size is off still
+    parses: its sizing.problem says so (never with user_size, a size from the request)."""
     data = load_json(text)
     try:
         plan = Plan.model_validate(data)
@@ -363,15 +398,16 @@ def parse_plan(text: str, inventory: Inventory, expansion: Expansion | None = No
     capacity = check_capacity(plan.model_dump(), inventory)
     if not capacity.ok:
         raise ValueError("the plan needs more than your budget of parts:\n" + capacity.report())
-    return plan
+    sizing = measure(plan.model_dump(), inventory, user_size=user_size).sizing
+    return plan.model_copy(update={"sizing": Sizing(**sizing.to_json())})
 
 
-def _plan_call(complete, model, content, parse) -> PlanResult:
+def _plan_call(complete, model, messages, parse) -> PlanResult:
     try:
         plan, usage, attempts = call_with_retry(
             complete or default_complete(),
             model=model,
-            messages=[{"role": "user", "content": content}],
+            messages=messages,
             parse=parse,
             max_tokens=MAX_TOKENS,
             what="plan",
@@ -383,6 +419,53 @@ def _plan_call(complete, model, content, parse) -> PlanResult:
     return PlanResult(plan, usage.cost_usd, attempts, usage.input_tokens, usage.output_tokens)
 
 
+def size_warning(message: str) -> None:
+    print(f"Warning: {message}", file=sys.stderr)
+
+
+def _sized_plan_call(complete, model, content, parse) -> PlanResult:
+    """A plan call, plus at most ONE more call when the plan is too small.
+
+    The size retry is separate from the retry for an unusable plan (each call has
+    its own). The planner gets its plan back with the "Too small" sentence. If
+    the plan is still too small, or the retry gives no usable plan, the
+    latest usable plan is kept and a warning is printed."""
+    first = _plan_call(complete, model, [{"role": "user", "content": content}], parse)
+    problem = first.plan.sizing.problem if first.plan.sizing else ""
+    if not problem:
+        return first
+    messages = [
+        {"role": "user", "content": content},
+        {"role": "assistant", "content": first.plan.model_dump_json(exclude={"sizing"}, exclude_none=True)},
+        {
+            "role": "user",
+            "content": f"{problem}\n\nThe plan above fits the parts, but it is smaller than they allow. Keep the "
+            "checklist. Reply with the complete corrected JSON plan and nothing else.",
+        },
+    ]
+    try:
+        second = _plan_call(complete, model, messages, parse)
+    except (PlanError, CallFailed) as err:
+        size_warning(f"the size retry gave no usable plan; keeping the first plan. {problem}")
+        return _add_usage(first, first.plan, err.usage, getattr(err, "attempts", 1), problem)
+    still = second.plan.sizing.problem if second.plan.sizing else ""
+    if still:
+        size_warning(f"the plan is still too small after one retry; keeping it. {still}")
+    return _add_usage(first, second.plan, second.usage, second.attempts, still)
+
+
+def _add_usage(first: PlanResult, plan: Plan, usage, attempts: int, warning: str) -> PlanResult:
+    return PlanResult(
+        plan,
+        first.cost_usd + usage.cost_usd,
+        first.attempts + attempts,
+        first.input_tokens + usage.input_tokens,
+        first.output_tokens + usage.output_tokens,
+        size_retried=True,
+        size_warning=warning,
+    )
+
+
 def make_plan(
     request: str,
     inventory: Inventory,
@@ -391,16 +474,19 @@ def make_plan(
     model: str = DEFAULT_PLAN_MODEL,
     complete: Callable[..., Any] | None = None,
 ) -> PlanResult:
-    """Ask the model for a plan. Retries once with the error if the plan is unusable.
+    """Ask the model for a plan. Retries once with the error if the plan is unusable,
+    and once more if it is too small (voxel.sizing); a request that states a size
+    keeps it and is not size-checked.
 
     With an expansion, the planner follows its description, size and proportions,
     and turns each key feature into a checklist item.
     """
-    return _plan_call(
+    user_size = states_size(request)
+    return _sized_plan_call(
         complete,
         model,
         plan_prompt(request, inventory, expansion),
-        lambda text: parse_plan(text, inventory, expansion),
+        lambda text: parse_plan(text, inventory, expansion, user_size=user_size),
     )
 
 
@@ -416,17 +502,22 @@ def revise_prompt(old_plan: Plan, review: Review, expansion: Expansion | None, i
         "change sections, sizes, positions, proportions and parts as needed. Do not just "
         "patch details. The builder will build your new plan from an empty build.\n\n"
         f"Review:\n{verdicts}\n\n"
-        f"Old plan:\n{old_plan.model_dump_json(indent=2)}\n\n"
+        f"Old plan:\n{old_plan.model_dump_json(indent=2, exclude={'sizing'})}\n\n"
         + (expansion_rules(expansion) if expansion is not None else "")
         + "Keep the checklist EXACTLY the same: the same items, in the same order.\n\n"
-        + plan_format_and_rules(inventory)
+        + plan_format_and_rules(inventory, _user_size(old_plan))
     )
+
+
+def _user_size(plan: Plan) -> bool:
+    """The plan's size came from the request, so a revision keeps it."""
+    return bool(plan.sizing and plan.sizing.user_size)
 
 
 def parse_revision(
     text: str, old_plan: Plan, inventory: Inventory, expansion: Expansion | None
 ) -> Plan:
-    plan = parse_plan(text, inventory, expansion)
+    plan = parse_plan(text, inventory, expansion, user_size=_user_size(old_plan))
     old = [item.strip() for item in old_plan.checklist]
     if [item.strip() for item in plan.checklist] != old:
         raise ValueError(
@@ -455,6 +546,6 @@ def revise_plan(
         {"type": "text", "text": revise_prompt(old_plan, review, expansion, inventory)},
         image_part(image_path),
     ]
-    return _plan_call(
+    return _sized_plan_call(
         complete, model, content, lambda text: parse_revision(text, old_plan, inventory, expansion)
     )

@@ -161,5 +161,15 @@
         }
       ]
     }
-  ]
+  ],
+  "sizing": {
+    "width": 12,
+    "depth": 31,
+    "height": 1.33,
+    "limited_by": "REDDISH_BROWN",
+    "utilization": 124,
+    "user_size": false,
+    "problem": "",
+    "line": "Size: 12 x 31 studs x 1.33 bricks, limited by REDDISH_BROWN (124% of budget)."
+  }
 }
