@@ -216,6 +216,11 @@ Flags:
 - `--plan-model`: model for the planning call (default `claude-opus-5-5`).
 - `--build-model`: model for the builder agent (default `claude-haiku-5-5`).
   `--model` still works as another name for it.
+- `--build-effort`: reasoning effort of the builder agent only: `none`, `minimal`,
+  `low`, `medium`, `high`, `xhigh` or `max` (default `medium`; it was `high`
+  before). The questions, description, plan, review and expert calls are not
+  changed. The summary shows it: `Builder: claude-haiku-5-5, effort medium`, and
+  `usage.json` saves it as `build_effort`.
 - `--max-cost`: USD cap for the whole run (default 1.5).
 - `--max-retries`: builder rounds after a failed gate (default 2).
 - `--inventory`: inventory file (default `inventory.json`).

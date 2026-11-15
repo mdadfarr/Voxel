@@ -111,6 +111,8 @@ OUT_DIR = "out"  # BrickWright's output folder in a record
 STEPPED_LDR = "build.ldr"  # the build in Voxel's step order
 UNORDERED_LDR = "build.unordered.ldr"  # the build in the builder's own order
 DEFAULT_MODEL = "claude-haiku-5-5"  # the build model
+DEFAULT_BUILD_EFFORT = "medium"  # the builder's reasoning effort (BrickWright's own default is high)
+BUILD_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 PLAN_FILE = "plan.json"
 PLANS_FILE = "plans.json"  # every plan version, in the final record
 USAGE_FILE = "usage.json"  # tokens and cost per model, in the final record
@@ -413,6 +415,8 @@ class DesignResult:
     max_cost: float = DEFAULT_MAX_COST  # the run's budget
     budget_note: str = ""  # "ran out before review round 2" when the budget stopped the run
     stopped: str = ""  # why an API call stopped the run (after its retries, or no credit)
+    build_model: str = ""
+    build_effort: str = ""  # the builder's reasoning effort
 
     @property
     def cost_usd(self) -> float:
@@ -708,6 +712,7 @@ def design(
     inventory_path,
     *,
     build_model=None,
+    build_effort=DEFAULT_BUILD_EFFORT,
     plan_model=DEFAULT_PLAN_MODEL,
     review_model=DEFAULT_REVIEW_MODEL,
     max_cost=DEFAULT_MAX_COST,
@@ -741,6 +746,10 @@ def design(
     from_record: skip Expand and Plan, and reuse that record's expansion and
     latest plan version (request may then be empty: the record's is used).
 
+    build_effort: the builder's reasoning effort (one of BUILD_EFFORTS; medium by
+    default). Only the builder: the questions, description, plan, review and
+    expert calls are not changed by it.
+
     max_cost is one budget for the whole run. Before each step Voxel checks what
     is left; each build round gets the rest as BrickWright's max_cost. When it
     runs out, the run stops and keeps the last build that passed the gate
@@ -766,7 +775,14 @@ def design(
     require_owned_check()
     set_expert(use_expert)
     build_model = build_model or os.environ.get("BRICKWRIGHT_GENERATION_MODEL") or DEFAULT_MODEL
-    kwargs = {"model": build_model, "max_cost": max_cost, "request_timeout": BUILD_CALL_TIMEOUT}
+    if build_effort not in BUILD_EFFORTS:
+        raise ValueError(f"build_effort must be one of {', '.join(BUILD_EFFORTS)}, not {build_effort!r}")
+    kwargs = {
+        "model": build_model,
+        "effort": build_effort,
+        "max_cost": max_cost,
+        "request_timeout": BUILD_CALL_TIMEOUT,
+    }
     if records_dir is not None:
         kwargs["records_dir"] = Path(records_dir)
     config = Config(**kwargs)
@@ -793,6 +809,8 @@ def design(
             reused_from=reused_from,
             max_cost=max_cost,
             stopped=reason,
+            build_model=build_model,
+            build_effort=build_effort,
         )
 
     def out_of_budget(where: str) -> None:
@@ -1014,6 +1032,8 @@ def design(
             "budget_note": budget_note or None,
             "stopped": stopped or None,
             "reused_from": reused_from or None,
+            "build_model": build_model,
+            "build_effort": build_effort,
         },
     )
 
@@ -1037,7 +1057,13 @@ def design(
         max_cost=max_cost,
         budget_note=budget_note,
         stopped=stopped,
+        build_model=build_model,
+        build_effort=build_effort,
     )
+
+
+def builder_line(result: DesignResult) -> str:
+    return f"Builder: {result.build_model}, effort {result.build_effort}"
 
 
 def models_line(result: DesignResult) -> str:
@@ -1104,6 +1130,12 @@ def main(argv=None) -> int:
         help=f"model for the builder agent (default {DEFAULT_MODEL})",
     )
     parser.add_argument(
+        "--build-effort",
+        choices=BUILD_EFFORTS,
+        default=DEFAULT_BUILD_EFFORT,
+        help=f"reasoning effort of the builder agent only (default {DEFAULT_BUILD_EFFORT})",
+    )
+    parser.add_argument(
         "--plan-model",
         default=DEFAULT_PLAN_MODEL,
         help=f"model for the planning call (default {DEFAULT_PLAN_MODEL})",
@@ -1156,6 +1188,7 @@ def main(argv=None) -> int:
             args.request,
             args.inventory,
             build_model=args.build_model,
+            build_effort=args.build_effort,
             plan_model=args.plan_model,
             max_cost=args.max_cost,
             max_retries=args.max_retries,
@@ -1196,6 +1229,8 @@ def print_summary(result: DesignResult) -> None:
             print(f"Note: {result.review_note}")
     if result.reused_from:
         print(f"Reused {result.reused_from}.")
+    if result.build_model:
+        print(builder_line(result))
     print(cost_line(result))
     print(models_line(result))
     print(budget_line(result))

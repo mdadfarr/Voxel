@@ -1296,3 +1296,62 @@ def test_a_credit_error_in_the_plan_stops_cleanly(tmp_path, monkeypatch, capsys,
     assert "the gate" not in "\n".join(lines[1:])
     assert "Cost: $0.000" in out and "Models: claude-opus-5-5 0 in / 0 out $0.000" in out and "Budget: $0.000 of $1.50 used" in out
     assert "Build file:" not in out
+
+
+# --- The builder's reasoning effort ------------------------------------------------
+
+
+def effort_run(seen):
+    """A stand-in agent that notes the config it was given."""
+    inner = fake_run_factory([2, 2, 2])
+
+    def run(record, config):
+        seen.append(config)
+        return inner(record, config)
+
+    return run
+
+
+def test_builder_effort_is_medium_by_default_and_shown_in_the_summary(tmp_path, capsys):
+    seen = []
+    result = run_design(tmp_path, make_inventory(tmp_path), effort_run(seen))
+    assert [c.effort.value for c in seen] == ["medium"]
+    assert (result.build_model, result.build_effort) == ("claude-haiku-5-5", "medium")
+    dz.print_summary(result)
+    assert "Builder: claude-haiku-5-5, effort medium" in capsys.readouterr().out.splitlines()
+    usage = json.loads((tmp_path / "rec" / result.record_id / dz.USAGE_FILE).read_text())
+    assert usage["build_effort"] == "medium" and usage["build_model"] == "claude-haiku-5-5"
+
+
+def test_build_effort_setting_changes_only_the_builder(tmp_path, capsys):
+    seen = []
+    result = run_design(tmp_path, make_inventory(tmp_path), effort_run(seen), build_effort="high")
+    assert [c.effort.value for c in seen] == ["high"] and result.build_effort == "high"
+    dz.print_summary(result)
+    assert "Builder: claude-haiku-5-5, effort high" in capsys.readouterr().out
+    # The plan, description, questions and review calls take no effort from it.
+    from voxel import expand, llm, plan, review
+
+    for module in (expand, llm, plan, review):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        assert "reasoning_effort" not in source and "build_effort" not in source
+    with pytest.raises(ValueError, match="build_effort must be one of"):
+        run_design(tmp_path, make_inventory(tmp_path), effort_run([]), build_effort="extreme")
+
+
+def test_build_effort_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    got = {}
+
+    def fake_design(request, inventory, **kwargs):
+        got.update(kwargs)
+        return dz.DesignResult(True, "rec", None, 1, "", build_model="claude-haiku-5-5", build_effort=kwargs["build_effort"])
+
+    monkeypatch.setattr(dz, "design", fake_design)
+    inv = str(make_inventory(tmp_path))
+    dz.main(["a tower", "--inventory", inv])
+    assert got["build_effort"] == "medium"
+    dz.main(["a tower", "--inventory", inv, "--build-effort", "high"])
+    assert got["build_effort"] == "high"
+    with pytest.raises(SystemExit):
+        dz.main(["a tower", "--inventory", inv, "--build-effort", "extreme"])
