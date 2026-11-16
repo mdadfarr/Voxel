@@ -1,0 +1,128 @@
+{
+  "pyproject.toml": {
+    "mtime": 1794028343.228346,
+    "seen": 1794630494.462368,
+    "ast_hash": "dff1e7281f4f7ec2c8885d1b08145d4c",
+    "semantic_hash": "dff1e7281f4f7ec2c8885d1b08145d4c"
+  },
+  "scripts/bw": {
+    "mtime": 1794019926.8647792,
+    "seen": 1794630494.4625669,
+    "ast_hash": "9f13e55949f3b8f3d54913c794bb9d0c",
+    "semantic_hash": "9f13e55949f3b8f3d54913c794bb9d0c"
+  },
+  "scripts/probe_set.py": {
+    "mtime": 1793925055.0993345,
+    "seen": 1794630494.462568,
+    "ast_hash": "93ef134e8699ed3efe975015e4fd3c5f",
+    "semantic_hash": "93ef134e8699ed3efe975015e4fd3c5f"
+  },
+  "src/voxel/__init__.py": {
+    "mtime": 1793925055.0995126,
+    "seen": 1794630494.462569,
+    "ast_hash": "12119d4c2f2cbc33bfda0a25ec60e396",
+    "semantic_hash": "12119d4c2f2cbc33bfda0a25ec60e396"
+  },
+  "src/voxel/check.py": {
+    "mtime": 1793925055.0995824,
+    "seen": 1794630494.462569,
+    "ast_hash": "ca859509cd120ae939bd52aeee9de424",
+    "semantic_hash": "ca859509cd120ae939bd52aeee9de424"
+  },
+  "src/voxel/design.py": {
+    "mtime": 1794177608.440284,
+    "seen": 1794630494.46257,
+    "ast_hash": "0f6a425e26baef930aa41109d712adad",
+    "semantic_hash": "0f6a425e26baef930aa41109d712adad"
+  },
+  "src/voxel/expand.py": {
+    "mtime": 1794169212.6298127,
+    "seen": 1794630494.462571,
+    "ast_hash": "453b11387b931b1757e0eafc53324d1e",
+    "semantic_hash": "453b11387b931b1757e0eafc53324d1e"
+  },
+  "src/voxel/expert.py": {
+    "mtime": 1794177568.1379366,
+    "seen": 1794630494.462571,
+    "ast_hash": "4b1f7967065c91c954cb6ae480b5cf49",
+    "semantic_hash": "4b1f7967065c91c954cb6ae480b5cf49"
+  },
+  "src/voxel/inventory.py": {
+    "mtime": 1794028307.122901,
+    "seen": 1794630494.462572,
+    "ast_hash": "7c8d4f25306dede21df9ec3fe153d76e",
+    "semantic_hash": "7c8d4f25306dede21df9ec3fe153d76e"
+  },
+  "src/voxel/llm.py": {
+    "mtime": 1794175820.4614718,
+    "seen": 1794630494.462573,
+    "ast_hash": "d34d82854c39f8ff0c2eeb6113810713",
+    "semantic_hash": "d34d82854c39f8ff0c2eeb6113810713"
+  },
+  "src/voxel/parts.py": {
+    "mtime": 1794034072.7950654,
+    "seen": 1794630494.4625752,
+    "ast_hash": "8f1d22aba071858beee7da8600bb59a7",
+    "semantic_hash": "8f1d22aba071858beee7da8600bb59a7"
+  },
+  "src/voxel/plan.py": {
+    "mtime": 1794175826.6798444,
+    "seen": 1794630494.4625752,
+    "ast_hash": "f663ee18e6d17d70baaa481aff6dee39",
+    "semantic_hash": "f663ee18e6d17d70baaa481aff6dee39"
+  },
+  "src/voxel/rebrickable.py": {
+    "mtime": 1793925055.099866,
+    "seen": 1794630494.4625762,
+    "ast_hash": "78cbfd0644b85d55df71c4d75bd60f11",
+    "semantic_hash": "78cbfd0644b85d55df71c4d75bd60f11"
+  },
+  "src/voxel/review.py": {
+    "mtime": 1794169216.8808818,
+    "seen": 1794630494.4625769,
+    "ast_hash": "85b7d8cf81f5ce5307b5b65baae0ab66",
+    "semantic_hash": "85b7d8cf81f5ce5307b5b65baae0ab66"
+  },
+  "src/voxel/sequence.py": {
+    "mtime": 1794167616.0045013,
+    "seen": 1794630494.4625769,
+    "ast_hash": "7a22bb5efb9de45c08ebd48cc3372b2e",
+    "semantic_hash": "7a22bb5efb9de45c08ebd48cc3372b2e"
+  },
+  "src/voxel/steps.py": {
+    "mtime": 1794165291.655277,
+    "seen": 1794630494.4625778,
+    "ast_hash": "f39da86fd65a7bb9b26a63479efda8ca",
+    "semantic_hash": "f39da86fd65a7bb9b26a63479efda8ca"
+  },
+  ".claude/agents/lego-builder.md": {
+    "mtime": 1794187547.8073804,
+    "seen": 1794630494.4625862,
+    "ast_hash": "e36d47401f6cc927095e8c35f02f399a",
+    "semantic_hash": "e36d47401f6cc927095e8c35f02f399a"
+  },
+  ".claude/agents/lego-solver.md": {
+    "mtime": 1794187550.5291271,
+    "seen": 1794630494.4625869,
+    "ast_hash": "48d11a0193b9472518d6022816dae0b1",
+    "semantic_hash": "48d11a0193b9472518d6022816dae0b1"
+  },
+  "CLAUDE.md": {
+    "mtime": 1794201003.0524833,
+    "seen": 1794630494.4625869,
+    "ast_hash": "8f589a965ed03b282eaf32029696a708",
+    "semantic_hash": "8f589a965ed03b282eaf32029696a708"
+  },
+  "INSTRUCTIONS.md": {
+    "mtime": 1794201440.803249,
+    "seen": 1794630494.4625878,
+    "ast_hash": "aee76843549046990e99ab275ecb0731",
+    "semantic_hash": "aee76843549046990e99ab275ecb0731"
+  },
+  "README.md": {
+    "mtime": 1794177887.7417586,
+    "seen": 1794630494.462589,
+    "ast_hash": "26d6f48f4d860c4dad9a3fa677750cb1",
+    "semantic_hash": "26d6f48f4d860c4dad9a3fa677750cb1"
+  }
+}
