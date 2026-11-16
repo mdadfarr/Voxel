@@ -247,10 +247,20 @@ Flags:
   4. clean shape: outline reads clearly, no stray or sticking-out pieces
   5. main features are visible in the front or top view
 
-  The review fails only if item 1 fails, or 2 or more of items 2-5 fail
-  (`reviews.json` keeps `failed_items` and the `rule`). A failed review ends the
-  run and keeps the build. Not with `--from-record`. Use it with
-  `--build-model claude-opus-5-5`.
+  The review fails if item 1 or item 4 fails, or 2 or more of items 2, 3 and 5
+  fail (`review.json` keeps `failed_items` and the `rule`).
+
+  Repair round: the first review runs inside the builder's run, through
+  BrickWright's review hook (`BRICKWRIGHT_REVIEW_HOOK`, set by Voxel; needs the
+  `ask-expert` fork). If it fails and at least $0.40 of `--max-cost` is left, the
+  failed items and the render go back to the builder in the same conversation:
+  it edits the existing `build.py`, validates and finalizes again. Then the gate
+  and the review run once more. One repair per run; the reviews and the repair
+  count in `--max-cost`. A repair that fails the gate or does not finalize is
+  undone (`out/build.before_repair.py` is put back). `review.json` keeps both
+  reviews (`stage`: `before repair`, `after repair`; `in run` when the first
+  passed), `usage.json` has `repair` (turns, cost, kept). Not with
+  `--from-record`. Use it with `--build-model claude-opus-5-5 --max-cost 2.5`.
 
 ## Get an inventory from set numbers
 

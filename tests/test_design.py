@@ -1473,8 +1473,9 @@ FIXED_ITEMS = [
 
 
 def test_no_plan_reviews_against_the_fixed_checklist_once_and_keeps_the_build(tmp_path):
+    # A run that never calls the review hook (no render inside it): the review after it decides.
     seen_plans = []
-    reviewer = fake_reviewer([[True, False, True, False, True]])
+    reviewer = fake_reviewer([[True, False, True, True, False]])
 
     def recording_reviewer(plan, expansion, image_path, *, model):
         seen_plans.append(plan)
@@ -1488,10 +1489,10 @@ def test_no_plan_reviews_against_the_fixed_checklist_once_and_keeps_the_build(tm
     assert result.ok and result.review_passed is False and result.review_rounds == 1
     assert reviser.calls == [] and len(run.calls) == 1  # no re-plan, no rebuild
     [entry] = reviews_in(tmp_path, result.record_id)
-    assert entry["passed"] is False and entry["failed_items"] == [2, 4]
-    assert entry["rule"] == "item 1 must pass, at most 1 other(s) may fail"
+    assert entry["passed"] is False and entry["failed_items"] == [2, 5]
+    assert entry["rule"] == "items 1 and 4 must pass, at most 1 other(s) may fail" and entry["stage"] == "after run"
     assert dz.review_line(result).startswith(
-        "Review: FAILED after 1 round(s) (3 of 5 items; rule: item 1 must pass, at most 1 other(s) may fail):\n"
+        "Review: FAILED after 1 round(s) (3 of 5 items; rule: items 1 and 4 must pass, at most 1 other(s) may fail):\n"
     )
     assert dz.exit_code(result) == 3
 
@@ -1558,3 +1559,151 @@ def test_no_plan_flag(tmp_path, monkeypatch):
     assert got["use_plan"] is True
     dz.main(["a tower", "--inventory", inv, "--no-plan"])
     assert got["use_plan"] is False
+
+
+# --- The repair round (--no-plan): review inside the run, one repair ------------------
+
+
+def repairing_run(after=2, *, before=2, done_after=True, repair_cost=0.2, build_cost=0.1):
+    """A stand-in agent that, like BrickWright with the review hook on, builds,
+    renders, calls the hook, and on a failed review edits build.py once more."""
+    from brickwright.driver.review_hook import review_hook, review_hook_enabled
+
+    calls = []
+
+    def run(record, config):
+        call = {"record": record.id, "config": config, "feedback": None}
+        calls.append(call)
+        record.write_build(BUILD_SRC.format(n=before))
+        cost, turns = build_cost, 4
+        image = Path(record.out_dir) / "build.png"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"fake png")
+        done = True
+        Path(record.messages_path).write_text('{"role": "assistant"}\n' * turns)  # the turns so far
+        if config.max_critique_rounds and review_hook_enabled():
+            outcome = review_hook()(record, image, config.max_cost - cost)
+            cost += outcome.usage.cost_usd if outcome.usage else 0.0
+            if not outcome.done:
+                call["feedback"] = outcome.feedback
+                record.write_build(BUILD_SRC.format(n=after))
+                cost += repair_cost
+                turns += 3
+                done = done_after
+        return SimpleNamespace(usage=SimpleNamespace(cost_usd=cost), done=done, turns=turns)
+
+    run.calls = calls
+    return run
+
+
+FAIL_SHAPE = [True, True, True, False, True]  # item 4 (clean shape) fails: must pass
+ALL_PASS = [True] * 5
+
+
+def test_failed_review_gets_one_repair_in_the_same_run(tmp_path):
+    run = repairing_run(after=1)
+    reviewer = fake_reviewer([FAIL_SHAPE, ALL_PASS])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+
+    [call] = run.calls  # one builder run: the repair is inside it, no new record
+    assert call["config"].max_critique_rounds == 1
+    assert call["feedback"].startswith("A reviewer judged your build's render (attached).")
+    assert "- clean shape: outline reads clearly, no stray or sticking-out pieces: " in call["feedback"]
+    assert "Edit the existing build.py to fix only these" in call["feedback"]
+    assert len(reviewer.calls) == 2  # before and after the repair
+    assert result.ok and result.review_passed is True and result.review_rounds == 2
+
+    before, after = reviews_in(tmp_path, result.record_id)
+    assert (before["stage"], before["passed"], before["failed_items"]) == ("before repair", False, [4])
+    assert (after["stage"], after["passed"], after["failed_items"]) == ("after repair", True, [])
+    assert before["image"].endswith("review.before_repair.png") and Path(before["image"]).exists()
+    folder = tmp_path / "rec" / result.record_id
+    assert (folder / "out" / "build.before_repair.py").read_text() == BUILD_SRC.format(n=2)
+    assert (folder / "build.py").read_text() == BUILD_SRC.format(n=1)  # the repaired build is kept
+
+    # Costs: both reviews on the review rows, the rest of the run as build.
+    assert result.review_cost_usd == pytest.approx(0.06)
+    assert result.build_cost_usd == pytest.approx(0.3)
+    repair = json.loads((folder / dz.USAGE_FILE).read_text())["repair"]
+    assert repair["ran"] and repair["kept"] and repair["turns"] == 3
+    assert repair["cost_usd"] == pytest.approx(0.2)
+    assert result.repair == "Repair: 1 round, 3 turn(s), $0.200; review 4 of 5 -> 5 of 5 items"
+
+
+def test_passed_review_inside_the_run_is_not_repeated(tmp_path):
+    run = repairing_run()
+    reviewer = fake_reviewer([ALL_PASS])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    assert run.calls[0]["feedback"] is None
+    assert len(reviewer.calls) == 1  # the in-run review is reused for the same build.py
+    [entry] = reviews_in(tmp_path, result.record_id)
+    assert entry["stage"] == "in run" and entry["passed"] is True
+    assert result.review_passed is True and result.repair == "Repair: not needed"
+    assert result.review_cost_usd == pytest.approx(0.03)
+
+
+def test_there_is_only_one_repair(tmp_path):
+    run = repairing_run(after=1)
+    reviewer = fake_reviewer([FAIL_SHAPE, FAIL_SHAPE])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    assert len(run.calls) == 1 and len(reviewer.calls) == 2
+    assert result.review_passed is False and dz.exit_code(result) == 3
+    assert [r["stage"] for r in reviews_in(tmp_path, result.record_id)] == ["before repair", "after repair"]
+
+
+def test_a_repair_that_fails_the_gate_is_undone(tmp_path):
+    run = repairing_run(after=3)  # 3 bricks, 2 owned: the gate fails
+    reviewer = fake_reviewer([FAIL_SHAPE])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    folder = tmp_path / "rec" / result.record_id
+    assert result.ok and len(run.calls) == 1  # no gate retry: the old build is put back
+    assert (folder / "build.py").read_text() == BUILD_SRC.format(n=2)
+    assert len(reviewer.calls) == 1 and result.review_passed is False  # review 1 stands
+    assert result.repair_note == "the repair failed the gate; kept the build from before it"
+    assert json.loads((folder / dz.USAGE_FILE).read_text())["repair"]["kept"] is False
+    assert "undone" in result.repair
+
+
+def test_a_repair_that_does_not_finalize_is_undone(tmp_path):
+    run = repairing_run(after=1, done_after=False)
+    reviewer = fake_reviewer([FAIL_SHAPE])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    assert (tmp_path / "rec" / result.record_id / "build.py").read_text() == BUILD_SRC.format(n=2)
+    assert result.repair_note == "the repair did not finalize; kept the build from before it"
+
+
+def test_no_repair_without_the_reserve(tmp_path):
+    from voxel.repair import REPAIR_RESERVE
+
+    run = repairing_run(after=1)
+    reviewer = fake_reviewer([FAIL_SHAPE])
+    # Questions $0.02, build $0.10, review $0.03: less than the reserve is left.
+    budget = 0.02 + 0.1 + 0.03 + REPAIR_RESERVE - 0.01
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=budget)
+    assert run.calls[0]["feedback"] is None and len(reviewer.calls) == 1
+    assert result.review_passed is False and result.repair == "Repair: did not run"
+    [entry] = reviews_in(tmp_path, result.record_id)
+    assert entry["stage"] == "in run"
+
+
+def test_no_review_inside_the_run_when_the_gate_fails(tmp_path):
+    run = repairing_run(before=3)  # every build fails the gate: nothing to review
+    reviewer = fake_reviewer([])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    assert reviewer.calls == [] and not result.ok
+    assert len(run.calls) == 3  # the normal gate retries
+
+
+def test_the_pipeline_has_no_review_hook(tmp_path):
+    from brickwright.driver.review_hook import REVIEW_HOOK_ENV
+
+    seen = []
+    inner = fake_run_factory([2])
+
+    def run(record, config):
+        seen.append((config.max_critique_rounds, dz.os.environ.get(REVIEW_HOOK_ENV)))
+        return inner(record, config)
+
+    run_design(tmp_path, make_inventory(tmp_path), run)
+    assert seen == [(0, None)]
+    assert REVIEW_HOOK_ENV not in dz.os.environ

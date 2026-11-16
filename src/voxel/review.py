@@ -3,8 +3,8 @@
 With --no-plan there is no plan: the reviewer gets the fixed Checklist
 (fixed_checklist: "looks like ..." plus four general quality items) and the
 request with its answers, and judges the render against it the same way. Its
-pass rule (review_passes) is looser than a plan's: item 1 must pass, and at most
-one other item may fail.
+pass rule (review_passes) is looser than a plan's: items 1 and 4 must pass, and
+at most one other item may fail.
 
 One LLM call (no tools, no loop) with the rendered image attached. For each
 checklist item in the plan it answers pass/fail with a short reason. The first
@@ -48,10 +48,11 @@ NO_PLAN_ITEMS = (
 
 
 def fixed_checklist(request: str) -> Checklist:
-    """The same checklist for every --no-plan build. The review fails only if
-    item 1 fails, or 2 or more of items 2-5 fail."""
+    """The same checklist for every --no-plan build. The review fails if item 1
+    (looks like it) or item 4 (clean shape) fails, or 2 or more of items 2, 3
+    and 5 fail."""
     first = f'looks like what was asked for ("{request.strip()}") to someone who only sees the picture'
-    return Checklist(checklist=[first, *NO_PLAN_ITEMS], must_pass=[1], max_failed=1)
+    return Checklist(checklist=[first, *NO_PLAN_ITEMS], must_pass=[1, 4], max_failed=1)
 
 
 def review_passes(review: "Review", plan: "Plan | Checklist") -> bool:
@@ -68,8 +69,9 @@ def pass_rule(plan: "Plan | Checklist") -> str:
     """The pass rule in words, for the summary and reviews.json."""
     if isinstance(plan, Plan) or (not plan.must_pass and plan.max_failed == 0):
         return "every item must pass"
-    must = ", ".join(str(n) for n in plan.must_pass)
-    label = "item" if len(plan.must_pass) == 1 else "items"
+    numbers = [str(n) for n in plan.must_pass]
+    must = numbers[0] if len(numbers) == 1 else ", ".join(numbers[:-1]) + f" and {numbers[-1]}"
+    label = "item" if len(numbers) == 1 else "items"
     return f"{label} {must} must pass, at most {plan.max_failed} other(s) may fail"
 
 

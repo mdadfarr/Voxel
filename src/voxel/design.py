@@ -56,10 +56,14 @@ re-plan, no plan.json. The questions still run (unless --no-expand); the builder
 model designs and builds alone from the request, the answers as one line, the
 orientation, every owned part and the owned-parts check (direct_prompt). No
 size rule, no budget table, no checklist in its prompt. ask_expert is off. The
-gate runs as usual, then one review against a fixed checklist (fixed_checklist:
-looks like the request, colors, proportions, clean shape, features visible); it
-fails only if item 1 fails or 2+ of items 2-5 fail. A failed review ends the run
-with the build kept.
+builder finalizes, then the build is reviewed against a fixed checklist
+(fixed_checklist: looks like the request, colors, proportions, clean shape,
+features visible) inside the run; it fails if item 1 or 4 fails or 2+ of items
+2, 3, 5 fail. A failed review gets one repair round in the same conversation
+(voxel.repair, through BrickWright's review hook): the builder edits build.py,
+validates and finalizes again. Then the gate and the review run once more. A
+repair that fails the gate or does not finalize is undone. review.json keeps
+both reviews (stage "before repair" / "after repair"); usage.json has "repair".
 
 The expert: design() turns on BrickWright's ask_expert tool (voxel.expert is its
 context hook). When the builder's validate fails, it asks the expert (Sonnet;
@@ -79,7 +83,7 @@ import os
 import subprocess
 import sys
 import traceback
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -111,6 +115,8 @@ from .plan import (
     revise_plan,
     spare_set,
 )
+from .repair import RepairContext, build_sha, restore
+from .repair import active as repair_active
 from .review import (
     DEFAULT_REVIEW_MODEL,
     Review,
@@ -446,6 +452,8 @@ class DesignResult:
     review_report: str = ""  # failed items of the last review
     review_rule: str = ""  # without a plan: the looser pass rule, in words
     review_items: str = ""  # without a plan: "4 of 5" items passed in the last review
+    repair: str = ""  # without a plan: the repair round, in one line
+    repair_note: str = ""  # the repair was undone (failed the gate, or did not finalize)
     review_note: str = ""  # why the review was skipped, or that an earlier build was kept
     usage: tuple[dict, ...] = ()  # per model: model, input_tokens, output_tokens, cost_usd, steps
     reused_from: str = ""  # with --from-record: "plan vN and expansion from <id>"
@@ -591,13 +599,14 @@ def expert_rescues(record) -> int:
     return rescues_used(load_state(record.path))
 
 
-def add_round_usage(ledger, build_model: str, record, used: Usage) -> None:
+def add_round_usage(ledger, build_model: str, record, used: Usage, booked: Usage = Usage()) -> None:
     """One builder run: BrickWright's total includes the expert calls, so they go on
-    their own rows (step "expert") and the rest counts as build."""
+    their own rows (step "expert") and the rest counts as build. `booked`: what the
+    caller already put on other rows (the in-run reviews), also not build."""
     experts = expert_usage(record)
     for model, usage in experts:
         ledger.add(model, "expert", usage)
-    spent = sum((usage for _, usage in experts), Usage())
+    spent = sum((usage for _, usage in experts), booked)
     ledger.add(
         build_model,
         "build",
@@ -843,6 +852,8 @@ def design(
     }
     if records_dir is not None:
         kwargs["records_dir"] = Path(records_dir)
+    if not use_plan:  # one review inside the run, then at most one repair (voxel.repair)
+        kwargs["max_critique_rounds"] = 1
     config = Config(**kwargs)
 
     ledger = UsageLedger()
@@ -976,23 +987,47 @@ def design(
         return rec
 
     rounds = 0
+    repair_ctx = (
+        RepairContext(
+            checklist=plan,
+            asked=expansion_text or request,
+            model=review_model,
+            reviewer=reviewer,
+            gate=gate,
+            inventory_path=inventory_path,
+            review_estimate=budget.estimate("review"),
+        )
+        if not use_plan
+        else None
+    )
+    repair_info: dict = {"ran": False}  # usage.json "repair"
+    repair_note = ""
+
+    def book_hook_reviews() -> Usage:
+        """The run's in-run reviews go on the review rows; returns their total."""
+        taken = repair_ctx.take_usage() if repair_ctx is not None else []
+        for usage in taken:
+            ledger.add(review_model, "review", usage)
+        return sum(taken, Usage())
 
     def build_until_gate(record):
         """(record, gate passed, report). A builder call that fails for good sets
         `stopped` and returns that round's record as not passed (it is not gated)."""
-        nonlocal rounds, stopped, rescues
+        nonlocal rounds, stopped, rescues, repair_note
         for attempt in range(1, max_retries + 2):
+            cfg = round_config()
             try:
-                with builder_retries():
-                    run_report = run(record, round_config())
+                with builder_retries(), (repair_active(repair_ctx) if repair_ctx else nullcontext()):
+                    run_report = run(record, cfg)
             except CallFailed as err:
-                add_round_usage(ledger, build_model, record, interrupted_usage(record))
+                add_round_usage(ledger, build_model, record, interrupted_usage(record), book_hook_reviews())
                 rescues += expert_rescues(record)
                 rounds += 1
                 stopped = f"{err.reason}, in build round {rounds}"
                 return record, False, f"Not checked: {stopped}."
             used, known = run_usage(run_report)
-            add_round_usage(ledger, build_model, record, used)
+            hook_reviews = book_hook_reviews()
+            add_round_usage(ledger, build_model, record, used, hook_reviews)
             rescues += expert_rescues(record)
             if not known:
                 warn(
@@ -1001,6 +1036,28 @@ def design(
                 )
             rounds += 1
             ok, report = gate(record.build_path, inventory_path)
+            asked = repair_ctx.repaired(record.id) if repair_ctx is not None else None
+            if asked is not None and not repair_info["ran"]:
+                finalized = bool(getattr(run_report, "done", True))
+                repair_info.update(
+                    ran=True,
+                    record_id=record.id,
+                    turns=max(0, int(getattr(run_report, "turns", 0) or 0) - asked.turns),
+                    cost_usd=max(
+                        0.0, used.cost_usd - (cfg.max_cost - asked.budget_left) - asked.result.cost_usd
+                    ),
+                    finalized=finalized,
+                    kept=True,
+                )
+                if not ok or not finalized:  # keep the build from before the repair
+                    restore(record)
+                    ok, report = gate(record.build_path, inventory_path)
+                    repair_info["kept"] = False
+                    repair_note = (
+                        "the repair " + ("failed the gate" if finalized else "did not finalize")
+                        + "; kept the build from before it"
+                    )
+                    warn(repair_note)
             if ok or attempt > max_retries:
                 return record, ok, report
             if not budget.allows("build"):
@@ -1009,6 +1066,23 @@ def design(
             record = new_record(feedback_prompt(gate_problem(report), prompt), record.id)
 
     reviews: list[dict] = []
+    logged_hook_reviews = 0  # in-run reviews already in `reviews`
+
+    def review_entry(number: int, record_id: str, image, result, stage: str | None) -> dict:
+        entry = {
+            "round": number,
+            "record_id": record_id,
+            "image": str(image),
+            "passed": review_passes(result.review, plan),
+            "cost_usd": result.cost_usd,
+            "verdicts": [v.model_dump() for v in result.review.verdicts],
+        }
+        if stage is not None:  # without a plan: the looser rule, and when it was judged
+            entry["stage"] = stage
+            entry["rule"] = pass_rule(plan)
+            entry["failed_items"] = [v.index for v in result.review.failed()]
+        return entry
+
     review_passed: bool | None = None
     failed_text = note = review_items = ""
     kept = None  # (record, report) of the last build that passed the gate
@@ -1027,44 +1101,50 @@ def design(
                 (record, report), ok = kept, True
             break
         kept = (record, report)
-        if not budget.allows("review"):
-            out_of_budget(f"review round {review_round}")
-            note, review_passed = "budget ran out", None
-            break
-        image, why = renderer(record, config)
-        if image is None:
-            note, review_passed = why, None
-            warn(f"review skipped: {why}")
-            break
-        try:
-            result = reviewer(plan, expansion_text, image, model=review_model)
-        except ReviewError as err:
-            ledger.add(review_model, "review", err.usage)
-            note, review_passed = str(err), None
-            warn(f"review skipped: {err}")
-            break
-        except CallFailed as err:
-            ledger.add(review_model, "review", err.usage)
-            stopped = f"{err.reason}, in review round {review_round}"
-            note, review_passed = "the review call failed", None
-            break
-        ledger.add(review_model, "review", result.usage)
+        reused = None  # an in-run review of exactly this build.py (voxel.repair)
+        if repair_ctx is not None:
+            for hooked in repair_ctx.reviews[logged_hook_reviews:]:
+                stage = "before repair" if hooked.repair else "in run"
+                reviews.append(review_entry(len(reviews) + 1, hooked.record_id, hooked.image, hooked.result, stage))
+            logged_hook_reviews = len(repair_ctx.reviews)
+            last = repair_ctx.last_review(record.id)
+            if last is not None and last.sha == build_sha(record.build_path):
+                reused = last
+        if reused is not None:
+            result = reused.result
+            image = reused.image
+        else:
+            if not budget.allows("review"):
+                out_of_budget(f"review round {review_round}")
+                note, review_passed = "budget ran out", None
+                break
+            image, why = renderer(record, config)
+            if image is None:
+                note, review_passed = why, None
+                warn(f"review skipped: {why}")
+                break
+            try:
+                result = reviewer(plan, expansion_text, image, model=review_model)
+            except ReviewError as err:
+                ledger.add(review_model, "review", err.usage)
+                note, review_passed = str(err), None
+                warn(f"review skipped: {err}")
+                break
+            except CallFailed as err:
+                ledger.add(review_model, "review", err.usage)
+                stopped = f"{err.reason}, in review round {review_round}"
+                note, review_passed = "the review call failed", None
+                break
+            ledger.add(review_model, "review", result.usage)
+            stage = None
+            if not use_plan:
+                stage = "after repair" if repair_info["ran"] and repair_info["kept"] else "after run"
+            reviews.append(review_entry(len(reviews) + 1 if not use_plan else review_round, record.id, image, result, stage))
         review_passed = review_passes(result.review, plan)
         failed_text = review_report(result.review)
-        entry = {
-            "round": review_round,
-            "record_id": record.id,
-            "image": str(image),
-            "passed": review_passed,
-            "cost_usd": result.cost_usd,
-            "verdicts": [v.model_dump() for v in result.review.verdicts],
-        }
-        if not use_plan:  # the looser rule: which items failed even when it passed
+        if not use_plan:
             total = len(result.review.verdicts)
             review_items = f"{total - len(result.review.failed())} of {total}"
-            entry["rule"] = pass_rule(plan)
-            entry["failed_items"] = [v.index for v in result.review.failed()]
-        reviews.append(entry)
         save_reviews(record, reviews)
         if review_passed or review_round == MAX_REVIEW_ROUNDS or not use_plan:
             break  # without a plan there is nothing to re-plan: keep the build
@@ -1112,6 +1192,7 @@ def design(
             "build_model": build_model,
             "build_effort": build_effort,
             "plan": use_plan,
+            **({"repair": repair_info} if not use_plan else {}),
         },
     )
 
@@ -1131,6 +1212,8 @@ def design(
         review_report=failed_text if review_passed is not None else "",
         review_rule=pass_rule(plan) if not use_plan and review_passed is not None else "",
         review_items=review_items,
+        repair=repair_line_text(repair_info, reviews) if not use_plan else "",
+        repair_note=repair_note,
         review_note=note,
         usage=tuple(usage),
         reused_from=reused_from,
@@ -1140,6 +1223,26 @@ def design(
         build_model=build_model,
         build_effort=build_effort,
     )
+
+
+def repair_line_text(info: dict, reviews: list[dict]) -> str:
+    """The repair round in one line: whether it ran, its cost, and the items passed
+    in the review before it and after it."""
+
+    def items(entry: dict) -> str:
+        total = len(entry["verdicts"])
+        return f"{total - len(entry['failed_items'])} of {total}"
+
+    before = next((r for r in reviews if r.get("stage") == "before repair"), None)
+    after = next((r for r in reviews if r.get("stage") == "after repair"), None)
+    if not info.get("ran"):
+        return "Repair: not needed" if any(r.get("passed") for r in reviews) else "Repair: did not run"
+    line = f"Repair: 1 round, {info['turns']} turn(s), ${info['cost_usd']:.3f}"
+    if not info.get("kept"):
+        return f"{line}; undone, kept the build from before it"
+    if before is not None and after is not None:
+        line += f"; review {items(before)} -> {items(after)} items"
+    return line
 
 
 def builder_line(result: DesignResult) -> str:
@@ -1249,8 +1352,8 @@ def main(argv=None) -> int:
         "--no-plan",
         action="store_true",
         help="no plan, no description, no re-plan: the build model designs and builds alone from "
-        "the request, the question answers and the part list, then one review against a fixed "
-        "checklist",
+        "the request, the question answers and the part list; reviewed against a fixed "
+        "checklist, with one repair round in the same conversation if the review fails",
     )
     parser.add_argument(
         "--no-expert",
@@ -1319,6 +1422,8 @@ def print_summary(result: DesignResult) -> None:
         print(review_line(result))
         if result.review_passed is False and result.review_note:
             print(f"Note: {result.review_note}")
+        if result.repair:
+            print(result.repair)
     if result.reused_from:
         print(f"Reused {result.reused_from}.")
     if result.build_model:
