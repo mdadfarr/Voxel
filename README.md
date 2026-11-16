@@ -234,13 +234,23 @@ Flags:
 - `--from-record <record_id>`: reuse that record's expansion and latest plan
   instead of asking, expanding and planning again.
 - `--no-expert`: do not offer the builder the `ask_expert` tool.
-- `--no-plan`: no plan call, no re-plan, no `plan.json`. The build model designs
-  and builds alone from the description, a checklist ("looks like what was asked
-  for: ..." plus the description's features), the planner's budget table, the
-  size rule and every part you own. `ask_expert` is off. The gate (inventory,
-  computed steps) and one review against that checklist run as usual; a failed
-  review ends the run and keeps the build. Needs the expand step, so not with
-  `--no-expand` or `--from-record`. Use it with `--build-model claude-opus-5-5`.
+- `--no-plan`: no plan call, no description call, no re-plan, no `plan.json`.
+  The questions still run (skip them with `--no-expand`). The build model designs
+  and builds alone from only the request, the answers as one line
+  (`Answers: color: RED; ...`), the orientation rule, every part you own and the
+  `check_owned` rule: no description, size rule, budget table or checklist.
+  `ask_expert` is off. The gate runs as usual, then one review against the same
+  fixed checklist for every build:
+  1. looks like what was asked for ("<request>") to someone who only sees the picture
+  2. colors make sense: each part one clear color, no random stripes
+  3. proportions are believable
+  4. clean shape: outline reads clearly, no stray or sticking-out pieces
+  5. main features are visible in the front or top view
+
+  The review fails only if item 1 fails, or 2 or more of items 2-5 fail
+  (`reviews.json` keeps `failed_items` and the `rule`). A failed review ends the
+  run and keeps the build. Not with `--from-record`. Use it with
+  `--build-model claude-opus-5-5`.
 
 ## Get an inventory from set numbers
 

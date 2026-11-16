@@ -118,3 +118,47 @@ def test_review_asks_for_the_review_schema_and_knows_the_layout(image):
     text = call["messages"][0]["content"][0]["text"]
     assert ORIENTATION in text
     assert "front (top left), side (top right), top (bottom left) and isometric (bottom right)" in text
+
+
+# --- The fixed checklist and its pass rule (--no-plan) ----------------------------
+
+
+def verdicts(*passed):
+    items = rv.fixed_checklist("a guitar").checklist
+    return rv.Review(
+        verdicts=[
+            rv.Verdict(index=n, item=item, passed=ok, reason="r")
+            for n, (item, ok) in enumerate(zip(items, passed), start=1)
+        ]
+    )
+
+
+def test_fixed_checklist_quotes_the_request_and_has_five_items():
+    checklist = rv.fixed_checklist(" make me a guitar ")
+    assert len(checklist.checklist) == 5
+    assert checklist.checklist[0] == (
+        'looks like what was asked for ("make me a guitar") to someone who only sees the picture'
+    )
+    assert checklist.must_pass == [1] and checklist.max_failed == 1
+
+
+@pytest.mark.parametrize(
+    "passed, ok",
+    [
+        ((True, True, True, True, True), True),
+        ((False, True, True, True, True), False),  # item 1 must pass
+        ((True, False, True, True, True), True),  # one of items 2-5 may fail
+        ((True, True, True, True, False), True),
+        ((True, False, True, False, True), False),  # two of items 2-5 fail
+    ],
+)
+def test_fixed_checklist_pass_rule(passed, ok):
+    assert rv.review_passes(verdicts(*passed), rv.fixed_checklist("a guitar")) is ok
+
+
+def test_plan_and_default_checklist_need_every_item():
+    review = verdicts(True, False, True, True, True)
+    plain = rv.Checklist(checklist=rv.fixed_checklist("a guitar").checklist)
+    assert rv.review_passes(review, plain) is False
+    assert rv.pass_rule(plain) == "every item must pass"
+    assert rv.pass_rule(rv.fixed_checklist("x")) == "item 1 must pass, at most 1 other(s) may fail"

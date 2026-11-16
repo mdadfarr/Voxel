@@ -1,7 +1,10 @@
 """Review a finished build against the plan's checklist, from its render.
 
-With --no-plan there is no plan: the reviewer gets a Checklist (the checklist
-alone) and judges the render against it the same way.
+With --no-plan there is no plan: the reviewer gets the fixed Checklist
+(fixed_checklist: "looks like ..." plus four general quality items) and the
+request with its answers, and judges the render against it the same way. Its
+pass rule (review_passes) is looser than a plan's: item 1 must pass, and at most
+one other item may fail.
 
 One LLM call (no tools, no loop) with the rendered image attached. For each
 checklist item in the plan it answers pass/fail with a short reason. The first
@@ -26,9 +29,48 @@ MAX_TOKENS = 8192
 
 
 class Checklist(StrictModel):
-    """What the reviewer judges when there is no plan (--no-plan): the checklist alone."""
+    """What the reviewer judges when there is no plan (--no-plan): the checklist alone.
+
+    The pass rule: every item in must_pass passes, and at most max_failed of the
+    other items fail. The defaults (none named, 0) mean every item must pass."""
 
     checklist: list[str] = Field(min_length=1)
+    must_pass: list[int] = Field(default_factory=list, description="1-based item numbers")
+    max_failed: int = Field(default=0, ge=0, description="other items allowed to fail")
+
+
+NO_PLAN_ITEMS = (
+    "colors make sense: each part one clear color, no random stripes",
+    "proportions are believable",
+    "clean shape: outline reads clearly, no stray or sticking-out pieces",
+    "main features are visible in the front or top view",
+)
+
+
+def fixed_checklist(request: str) -> Checklist:
+    """The same checklist for every --no-plan build. The review fails only if
+    item 1 fails, or 2 or more of items 2-5 fail."""
+    first = f'looks like what was asked for ("{request.strip()}") to someone who only sees the picture'
+    return Checklist(checklist=[first, *NO_PLAN_ITEMS], must_pass=[1], max_failed=1)
+
+
+def review_passes(review: "Review", plan: "Plan | Checklist") -> bool:
+    """The review's result under the checklist's pass rule. A plan's checklist:
+    every item must pass."""
+    if isinstance(plan, Plan):
+        return review.passed
+    failed = {v.index for v in review.failed()}
+    must = set(plan.must_pass)
+    return not (failed & must) and len(failed - must) <= plan.max_failed
+
+
+def pass_rule(plan: "Plan | Checklist") -> str:
+    """The pass rule in words, for the summary and reviews.json."""
+    if isinstance(plan, Plan) or (not plan.must_pass and plan.max_failed == 0):
+        return "every item must pass"
+    must = ", ".join(str(n) for n in plan.must_pass)
+    label = "item" if len(plan.must_pass) == 1 else "items"
+    return f"{label} {must} must pass, at most {plan.max_failed} other(s) may fail"
 
 
 class Verdict(StrictModel):
@@ -95,7 +137,8 @@ def review_prompt(plan: Plan | Checklist, expansion: str | None) -> str:
             {"index": 1, "item": plan.checklist[0], "passed": True, "reason": "short reason"},
         ]
     }
-    context = f"Detailed description of what was asked for:\n{expansion}\n\n" if expansion else ""
+    label = "Detailed description of what was asked for" if isinstance(plan, Plan) else "What was asked for"
+    context = f"{label}:\n{expansion}\n\n" if expansion else ""
     if isinstance(plan, Plan):
         context += f"The plan the builder followed:\n{plan.model_dump_json(indent=2)}\n\n"
     return (

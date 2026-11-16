@@ -51,12 +51,15 @@ except that a builder call is not retried on a timeout. Calls time out after
 or a credit balance too low, stops the run cleanly: the last build that passed
 the gate is kept, the normal summary is printed, and the exit code is 5.
 
-No plan (--no-plan, use_plan=False): no plan call, no re-plan, no plan.json.
-The builder model designs and builds alone from the description, a checklist
-("looks like ..." plus the description's features), the planner's budget table,
-the size rule and every owned part (direct_prompt). ask_expert is off. The gate
-(inventory, computed steps) and one review against that checklist run as usual;
-a failed review ends the run with the build kept. Needs the expand step.
+No plan (--no-plan, use_plan=False): no plan call, no description call, no
+re-plan, no plan.json. The questions still run (unless --no-expand); the builder
+model designs and builds alone from the request, the answers as one line, the
+orientation, every owned part and the owned-parts check (direct_prompt). No
+size rule, no budget table, no checklist in its prompt. ask_expert is off. The
+gate runs as usual, then one review against a fixed checklist (fixed_checklist:
+looks like the request, colors, proportions, clean shape, features visible); it
+fails only if item 1 fails or 2+ of items 2-5 fail. A failed review ends the run
+with the build kept.
 
 The expert: design() turns on BrickWright's ask_expert tool (voxel.expert is its
 context hook). When the builder's validate fails, it asks the expert (Sonnet;
@@ -96,7 +99,6 @@ from .inventory import Inventory, PartKey, color_label, color_name, load_invento
 from .expert import CONTEXT_HOOK, EXPERT_RULE, INVENTORY_ENV
 from .llm import DEFAULT_TIMEOUT, CallFailed, Usage, call_api
 from .parts import part_name
-from .capacity import CAPACITY_RULES, capacity_table
 from .plan import (
     DEFAULT_PLAN_MODEL,
     ORIENTATION,
@@ -109,10 +111,17 @@ from .plan import (
     revise_plan,
     spare_set,
 )
-from .review import DEFAULT_REVIEW_MODEL, Checklist, Review, ReviewError, review_report
+from .review import (
+    DEFAULT_REVIEW_MODEL,
+    Review,
+    ReviewError,
+    fixed_checklist,
+    pass_rule,
+    review_passes,
+    review_report,
+)
 from .review import review as run_review
 from .sequence import sequence, stepped_build
-from .sizing import size_rule, states_size
 from .steps import step_problems
 
 REQUIRED_CHECKS_ENV = "BRICKWRIGHT_REQUIRED_CHECKS"  # read by brickwright's validation
@@ -254,31 +263,18 @@ def owned_parts_text(inventory: Inventory) -> str:
     )
 
 
-def direct_checklist(request: str, expansion: Expansion) -> Checklist:
-    """The review checklist without a plan: "looks like ..." plus the description's features."""
-    return Checklist(checklist=[f"looks like what was asked for: {request}", *expansion.features])
+def answers_line(answers: list[Answer]) -> str:
+    """The question answers as one short line ("" when there are none)."""
+    if not answers:
+        return ""
+    return "Answers: " + "; ".join(f"{a.question.id}: {a.value}" for a in answers)
 
 
-def direct_prompt(request: str, inventory: Inventory, expansion: Expansion, checklist: Checklist) -> str:
-    """The builder's prompt without a plan (--no-plan): it designs and builds alone."""
-    items = "\n".join(f"{n}. {item}" for n, item in enumerate(checklist.checklist, start=1))
-    return (
-        f"{request}\n\n"
-        "There is no plan: design the model yourself and build it. Check your work with "
-        "validate and render as you go.\n\n"
-        f"Detailed description (follow it):\n{expansion.as_text()}\n\n"
-        "The finished build will be judged from its render against this checklist:\n"
-        f"{items}\n\n"
-        f"Units: x, y, width and depth are in studs; {UNITS}, the same units as "
-        "BrickLayer's add() position (x, y, z). A plate-thick step is 1/3 brick.\n"
-        f"{ORIENTATION}\n\n"
-        f"{size_rule(states_size(request))}\n"
-        f"{CAPACITY_RULES}\n"
-        "Plate-cells you may plan with, in plain bricks and plates:\n"
-        f"{capacity_table(inventory)}\n\n"
-        f"{owned_parts_text(inventory)}\n\n"
-        f"{CHECK_OWNED_RULE}"
-    )
+def direct_prompt(request: str, inventory: Inventory, answers: str = "") -> str:
+    """The builder's prompt without a plan (--no-plan): only the request, the answers
+    line, the orientation, every owned part and the owned-parts check."""
+    asked = f"{request}\n{answers}" if answers else request
+    return f"{asked}\n\n{ORIENTATION}\n\n{owned_parts_text(inventory)}\n\n{CHECK_OWNED_RULE}"
 
 
 # --- Layer 2: the independent gate --------------------------------------------
@@ -448,6 +444,8 @@ class DesignResult:
     review_passed: bool | None = None  # None: not reviewed (skipped, or the gate failed)
     review_rounds: int = 0
     review_report: str = ""  # failed items of the last review
+    review_rule: str = ""  # without a plan: the looser pass rule, in words
+    review_items: str = ""  # without a plan: "4 of 5" items passed in the last review
     review_note: str = ""  # why the review was skipped, or that an earlier build was kept
     usage: tuple[dict, ...] = ()  # per model: model, input_tokens, output_tokens, cost_usd, steps
     reused_from: str = ""  # with --from-record: "plan vN and expansion from <id>"
@@ -710,6 +708,16 @@ def collect_answers(questions: list[Question], ask=input, interactive: bool = Tr
     return answers
 
 
+def answers_record(request: str, answers: list[Answer], cost_usd: float) -> dict:
+    """expansion.json without a plan: the questions and answers, no description."""
+    return {
+        "request": request,
+        "questions": [a.question.model_dump() for a in answers],
+        "answers": [a.to_json() for a in answers],
+        "cost_usd": cost_usd,
+    }
+
+
 def expansion_record(
     request: str, answers: list[Answer], expansion: Expansion, cost_usd: float
 ) -> dict:
@@ -787,9 +795,10 @@ def design(
     from_record: skip Expand and Plan, and reuse that record's expansion and
     latest plan version (request may then be empty: the record's is used).
 
-    use_plan=False: no plan call, no re-plan, no plan.json; the builder designs
-    and builds alone (see the module docstring). Needs use_expand, and cannot be
-    combined with from_record (which reuses a plan). ask_expert is off.
+    use_plan=False: no plan call, no description call, no re-plan, no plan.json;
+    the builder designs and builds alone (see the module docstring), and the
+    review uses the fixed checklist and its looser pass rule. Cannot be combined
+    with from_record (which reuses a plan). ask_expert is off.
 
     build_effort: the builder's reasoning effort (one of BUILD_EFFORTS; medium by
     default). Only the builder: the questions, description, plan, review and
@@ -813,8 +822,8 @@ def design(
     from brickwright.driver.loop import run_agent
     from brickwright.record import Record
 
-    if not use_plan and (from_record or not use_expand):
-        raise ValueError("no plan needs the expand step and cannot reuse a record's plan")
+    if not use_plan and from_record:
+        raise ValueError("no plan cannot reuse a record's plan")
     if not use_plan:
         use_expert = False  # the builder works alone
     run = run or run_agent
@@ -882,6 +891,7 @@ def design(
         )
     expansion: Expansion | None = None
     expansion_data: dict | None = None
+    answers: list[Answer] = []
     reused_from = ""
 
     if from_record:
@@ -913,6 +923,9 @@ def design(
                 return no_build(err.reason)
             ledger.add(expand_model, "questions", asked.usage)
             answers = collect_answers(asked.questions, ask, interactive=ask_user)
+        if use_expand and not use_plan:  # no description: the builder gets the answers as one line
+            expansion_data = answers_record(request, answers, ledger.step_cost("expand"))
+        elif use_expand:
             budget.require("expand", "the expansion")
             try:
                 expanded = expander(request, answers, inventory, model=expand_model)
@@ -927,9 +940,9 @@ def design(
             expansion_data = expansion_record(request, answers, expansion, ledger.step_cost("expand"))
     if not use_plan:
         plans = []
-        assert expansion is not None
-        plan = direct_checklist(request, expansion)  # what the review judges
-        prompt = direct_prompt(request, inventory, expansion, plan)
+        plan = fixed_checklist(request)  # what the review judges, the same for every build
+        asked_line = answers_line(answers)
+        prompt = direct_prompt(request, inventory, asked_line)
     elif not from_record:
         budget.require("plan", "the plan")
         try:
@@ -948,6 +961,8 @@ def design(
             print(plan.sizing.line)  # "Size: ..." (voxel.sizing); also saved in plan.json
         prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan), expert=use_expert)
     expansion_text = expansion.as_text() if expansion is not None else None
+    if not use_plan:  # the reviewer knows what was asked for, not a description
+        expansion_text = f"{request}\n{asked_line}" if asked_line else request
 
     def new_record(record_prompt: str, from_id: str | None = None):
         rec = Record.create(config, prompt=record_prompt, from_id=from_id)
@@ -995,7 +1010,7 @@ def design(
 
     reviews: list[dict] = []
     review_passed: bool | None = None
-    failed_text = note = ""
+    failed_text = note = review_items = ""
     kept = None  # (record, report) of the last build that passed the gate
     budget.require("build", "the first build")
     record = new_record(prompt)
@@ -1034,18 +1049,22 @@ def design(
             note, review_passed = "the review call failed", None
             break
         ledger.add(review_model, "review", result.usage)
-        review_passed = result.review.passed
+        review_passed = review_passes(result.review, plan)
         failed_text = review_report(result.review)
-        reviews.append(
-            {
-                "round": review_round,
-                "record_id": record.id,
-                "image": str(image),
-                "passed": review_passed,
-                "cost_usd": result.cost_usd,
-                "verdicts": [v.model_dump() for v in result.review.verdicts],
-            }
-        )
+        entry = {
+            "round": review_round,
+            "record_id": record.id,
+            "image": str(image),
+            "passed": review_passed,
+            "cost_usd": result.cost_usd,
+            "verdicts": [v.model_dump() for v in result.review.verdicts],
+        }
+        if not use_plan:  # the looser rule: which items failed even when it passed
+            total = len(result.review.verdicts)
+            review_items = f"{total - len(result.review.failed())} of {total}"
+            entry["rule"] = pass_rule(plan)
+            entry["failed_items"] = [v.index for v in result.review.failed()]
+        reviews.append(entry)
         save_reviews(record, reviews)
         if review_passed or review_round == MAX_REVIEW_ROUNDS or not use_plan:
             break  # without a plan there is nothing to re-plan: keep the build
@@ -1109,7 +1128,9 @@ def design(
         expert_cost_usd=ledger.step_cost("expert"),
         review_passed=review_passed,
         review_rounds=len(reviews),
-        review_report=failed_text if review_passed is False else "",
+        review_report=failed_text if review_passed is not None else "",
+        review_rule=pass_rule(plan) if not use_plan and review_passed is not None else "",
+        review_items=review_items,
         review_note=note,
         usage=tuple(usage),
         reused_from=reused_from,
@@ -1151,9 +1172,11 @@ def budget_line(result: DesignResult) -> str:
 def review_line(result: DesignResult) -> str:
     if result.review_passed is None:
         return f"Review: skipped ({result.review_note})" if result.review_note else "Review: not run"
-    if result.review_passed:
-        return f"Review: passed after {result.review_rounds} round(s)"
-    return f"Review: FAILED after {result.review_rounds} round(s):\n{result.review_report}"
+    outcome = "passed" if result.review_passed else "FAILED"
+    line = f"Review: {outcome} after {result.review_rounds} round(s)"
+    if result.review_rule:
+        line += f" ({result.review_items} items; rule: {result.review_rule})"
+    return f"{line}:\n{result.review_report}" if result.review_report else line
 
 
 def stopped_line(result: DesignResult) -> str:
@@ -1225,8 +1248,9 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--no-plan",
         action="store_true",
-        help="no plan call and no re-plan: the build model designs and builds alone from the "
-        "description, checklist and budget table, then one review (needs the expand step)",
+        help="no plan, no description, no re-plan: the build model designs and builds alone from "
+        "the request, the question answers and the part list, then one review against a fixed "
+        "checklist",
     )
     parser.add_argument(
         "--no-expert",
@@ -1236,8 +1260,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if not args.request and not args.from_record:
         parser.error("the request is required unless --from-record is given")
-    if args.no_plan and (args.no_expand or args.from_record):
-        parser.error("--no-plan needs the expand step: it cannot be combined with --no-expand or --from-record")
+    if args.no_plan and args.from_record:
+        parser.error("--no-plan cannot be combined with --from-record (it reuses a plan)")
     if argv is None and os.name == "nt" and not sys.flags.utf8_mode:
         # BrickWright writes its transcript with the Windows default encoding,
         # which cannot hold some characters. Run again in UTF-8 mode.

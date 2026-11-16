@@ -1403,8 +1403,7 @@ def test_no_plan_skips_the_planner_and_writes_no_plan_files(tmp_path):
     assert json.loads((folder / dz.USAGE_FILE).read_text())["plan"] is False
 
 
-def test_no_plan_builder_prompt_has_description_checklist_budget_and_parts(tmp_path, monkeypatch):
-    monkeypatch.delenv("VOXEL_PLANNER_MARGIN", raising=False)
+def test_no_plan_builder_prompt_is_request_answers_and_parts(tmp_path):
     prompts = []
     inner = fake_run_factory([2])
 
@@ -1412,16 +1411,49 @@ def test_no_plan_builder_prompt_has_description_checklist_budget_and_parts(tmp_p
         prompts.append(record.read_meta().prompt)
         return inner(record, config)
 
-    result, _, _ = no_plan_design(tmp_path, run)
+    expander = fake_expander()
+    no_plan_design(tmp_path, run, expander=expander)
+    assert expander.calls == []  # no description call
     [prompt] = prompts
-    assert prompt.startswith("a tower\n\nThere is no plan: design the model yourself and build it.")
-    assert TOWER_EXPANSION.as_text() in prompt
-    assert "1. looks like what was asked for: a tower\n2. white top" in prompt
-    assert "Choose the overall size so that the color you use most" in prompt
-    assert "Plate-cells you may plan with" in prompt and "color | parts up to 1 wide" in prompt
+    assert prompt.startswith("a tower\nAnswers: color: RED; height: 6 bricks\n\nOrientation:")
     assert "3001 | Brick 2 x 4 | Red | 2" in prompt  # every owned part, full count
-    assert "check_owned(tests)" in prompt
-    assert "PLAN:" not in prompt and "Spare parts" not in prompt and "ask_expert" not in prompt
+    assert prompt.endswith(dz.CHECK_OWNED_RULE)
+    for gone in (
+        TOWER_EXPANSION.description,
+        "white top",
+        "looks like",
+        "Choose the overall size",
+        "Plate-cells you may plan with",
+        "Units:",
+        "There is no plan",
+        "PLAN:",
+        "Spare parts",
+        "ask_expert",
+    ):
+        assert gone not in prompt
+
+
+def test_no_plan_saves_the_answers_without_a_description(tmp_path):
+    result, _, _ = no_plan_design(tmp_path, fake_run_factory([2]))
+    data = json.loads((tmp_path / "rec" / result.record_id / dz.EXPANSION_FILE).read_text())
+    assert [a["answer"] for a in data["answers"]] == ["RED", "6 bricks"]
+    assert "description" not in data and "features" not in data
+    assert result.expand_cost_usd == pytest.approx(0.02)  # the questions call only
+
+
+def test_no_plan_without_expand_builds_from_the_request_alone(tmp_path):
+    prompts = []
+    inner = fake_run_factory([2])
+
+    def run(record, config):
+        prompts.append(record.read_meta().prompt)
+        return inner(record, config)
+
+    asker = fake_asker()
+    result = run_design(tmp_path, make_inventory(tmp_path), run, use_plan=False, use_expand=False, asker=asker)
+    assert result.ok and asker.calls == []
+    assert prompts[0].startswith("a tower\n\nOrientation:") and "Answers:" not in prompts[0]
+    assert not (tmp_path / "rec" / result.record_id / dz.EXPANSION_FILE).exists()
 
 
 def test_no_plan_turns_the_expert_off(tmp_path, monkeypatch):
@@ -1431,9 +1463,18 @@ def test_no_plan_turns_the_expert_off(tmp_path, monkeypatch):
     assert EXPERT_CONTEXT_ENV not in dz.os.environ
 
 
-def test_no_plan_reviews_against_the_checklist_once_and_keeps_the_build(tmp_path):
+FIXED_ITEMS = [
+    'looks like what was asked for ("a tower") to someone who only sees the picture',
+    "colors make sense: each part one clear color, no random stripes",
+    "proportions are believable",
+    "clean shape: outline reads clearly, no stray or sticking-out pieces",
+    "main features are visible in the front or top view",
+]
+
+
+def test_no_plan_reviews_against_the_fixed_checklist_once_and_keeps_the_build(tmp_path):
     seen_plans = []
-    reviewer = fake_reviewer([[True, False], [True, True]])
+    reviewer = fake_reviewer([[True, False, True, False, True]])
 
     def recording_reviewer(plan, expansion, image_path, *, model):
         seen_plans.append(plan)
@@ -1442,33 +1483,64 @@ def test_no_plan_reviews_against_the_checklist_once_and_keeps_the_build(tmp_path
     run = fake_run_factory([2, 2])
     result, _, reviser = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=recording_reviewer)
     [checklist] = seen_plans
-    assert checklist.checklist == ["looks like what was asked for: a tower", "white top"]
-    assert reviewer.calls[0]["expansion"] == TOWER_EXPANSION.as_text()
+    assert checklist.checklist == FIXED_ITEMS
+    assert reviewer.calls[0]["expansion"] == "a tower\nAnswers: color: RED; height: 6 bricks"
     assert result.ok and result.review_passed is False and result.review_rounds == 1
     assert reviser.calls == [] and len(run.calls) == 1  # no re-plan, no rebuild
     [entry] = reviews_in(tmp_path, result.record_id)
-    assert entry["verdicts"][1]["item"] == "white top" and entry["passed"] is False
+    assert entry["passed"] is False and entry["failed_items"] == [2, 4]
+    assert entry["rule"] == "item 1 must pass, at most 1 other(s) may fail"
+    assert dz.review_line(result).startswith(
+        "Review: FAILED after 1 round(s) (3 of 5 items; rule: item 1 must pass, at most 1 other(s) may fail):\n"
+    )
+    assert dz.exit_code(result) == 3
+
+
+def test_no_plan_review_passes_with_one_quality_item_failed(tmp_path):
+    reviewer = fake_reviewer([[True, True, False, True, True]])
+    result, _, _ = no_plan_design(tmp_path, fake_run_factory([2]), renderer=fake_renderer, reviewer=reviewer)
+    assert result.review_passed is True and dz.exit_code(result) == 0
+    line = dz.review_line(result)
+    assert line.startswith("Review: passed after 1 round(s) (4 of 5 items;")
+    assert "proportions are believable" in line  # the failed item is still shown
+    [entry] = reviews_in(tmp_path, result.record_id)
+    assert entry["passed"] is True and entry["failed_items"] == [3]
+
+
+def test_no_plan_review_fails_when_it_does_not_look_like_the_request(tmp_path):
+    reviewer = fake_reviewer([[False, True, True, True, True]])
+    result, _, _ = no_plan_design(tmp_path, fake_run_factory([2]), renderer=fake_renderer, reviewer=reviewer)
+    assert result.review_passed is False
 
 
 def test_review_prompt_without_a_plan():
-    from voxel.review import Checklist, review_prompt
+    from voxel.review import fixed_checklist, review_prompt
 
-    prompt = review_prompt(Checklist(checklist=["looks like a tower", "white top"]), "A tall tower.")
-    assert "Checklist:\n1. looks like a tower\n2. white top" in prompt
-    assert "Detailed description of what was asked for:\nA tall tower." in prompt
-    assert "The plan the builder followed" not in prompt
-    with_plan = review_prompt(Plan.model_validate(TOWER_PLAN), None)
-    assert "The plan the builder followed" in with_plan  # the pipeline's review is unchanged
+    prompt = review_prompt(fixed_checklist("a tower"), "a tower\nAnswers: color: RED")
+    assert "Checklist:\n" + "\n".join(f"{n}. {i}" for n, i in enumerate(FIXED_ITEMS, start=1)) in prompt
+    assert "What was asked for:\na tower\nAnswers: color: RED" in prompt
+    assert "Detailed description" not in prompt and "The plan the builder followed" not in prompt
+    with_plan = review_prompt(Plan.model_validate(TOWER_PLAN), "A tall tower.")
+    assert "Detailed description of what was asked for:\nA tall tower." in with_plan  # pipeline unchanged
+    assert "The plan the builder followed" in with_plan
 
 
-def test_no_plan_needs_the_expand_step(tmp_path, monkeypatch):
-    with pytest.raises(ValueError, match="no plan needs the expand step"):
-        run_design(tmp_path, make_inventory(tmp_path), fake_run_factory([2]), use_plan=False)
+def test_pipeline_review_still_needs_every_item(tmp_path):
+    run = fake_run_factory([2, 2, 2])
+    reviewer = fake_reviewer([[True, False], [True, False]])
+    result = run_design(tmp_path, make_inventory(tmp_path), run, renderer=fake_renderer, reviewer=reviewer)
+    assert result.review_passed is False
+    assert "failed_items" not in reviews_in(tmp_path, result.record_id)[0]
+    assert "rule:" not in dz.review_line(result)
+
+
+def test_no_plan_cannot_reuse_a_record(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="no plan cannot reuse"):
+        run_design(tmp_path, make_inventory(tmp_path), fake_run_factory([2]), use_plan=False, from_record="x")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     inv = str(make_inventory(tmp_path))
-    for extra in (["--no-expand"], ["--from-record", "x"]):
-        with pytest.raises(SystemExit):
-            dz.main(["a tower", "--inventory", inv, "--no-plan", *extra])
+    with pytest.raises(SystemExit):
+        dz.main(["a tower", "--inventory", inv, "--no-plan", "--from-record", "x"])
 
 
 def test_no_plan_flag(tmp_path, monkeypatch):
