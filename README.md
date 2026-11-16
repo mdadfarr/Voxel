@@ -231,6 +231,13 @@ Flags:
 - `--from-record <record_id>`: reuse that record's expansion and latest plan
   instead of asking, expanding and planning again.
 - `--no-expert`: do not offer the builder the `ask_expert` tool.
+- `--no-plan`: no plan call, no re-plan, no `plan.json`. The build model designs
+  and builds alone from the description, a checklist ("looks like what was asked
+  for: ..." plus the description's features), the planner's budget table, the
+  size rule and every part you own. `ask_expert` is off. The gate (inventory,
+  computed steps) and one review against that checklist run as usual; a failed
+  review ends the run and keeps the build. Needs the expand step, so not with
+  `--no-expand` or `--from-record`. Use it with `--build-model claude-opus-5-5`.
 
 ## Get an inventory from set numbers
 

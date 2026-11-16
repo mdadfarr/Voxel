@@ -50,6 +50,13 @@ Calls time out after 180 s (360 s for plan and revise). A call that still fails,
 or a credit balance too low, stops the run cleanly: the last build that passed
 the gate is kept, the normal summary is printed, and the exit code is 5.
 
+No plan (--no-plan, use_plan=False): no plan call, no re-plan, no plan.json.
+The builder model designs and builds alone from the description, a checklist
+("looks like ..." plus the description's features), the planner's budget table,
+the size rule and every owned part (direct_prompt). ask_expert is off. The gate
+(inventory, computed steps) and one review against that checklist run as usual;
+a failed review ends the run with the build kept. Needs the expand step.
+
 The expert: design() turns on BrickWright's ask_expert tool (voxel.expert is its
 context hook). When the builder's validate fails, it asks the expert (Sonnet;
 Opus after 5 tries on one problem, at most 3 Opus rescues per run) and applies
@@ -88,6 +95,7 @@ from .inventory import Inventory, PartKey, color_label, color_name, load_invento
 from .expert import CONTEXT_HOOK, EXPERT_RULE, INVENTORY_ENV
 from .llm import DEFAULT_TIMEOUT, CallFailed, Usage, call_api
 from .parts import part_name
+from .capacity import CAPACITY_RULES, capacity_table
 from .plan import (
     DEFAULT_PLAN_MODEL,
     ORIENTATION,
@@ -100,9 +108,10 @@ from .plan import (
     revise_plan,
     spare_set,
 )
-from .review import DEFAULT_REVIEW_MODEL, Review, ReviewError, review_report
+from .review import DEFAULT_REVIEW_MODEL, Checklist, Review, ReviewError, review_report
 from .review import review as run_review
 from .sequence import sequence, stepped_build
+from .sizing import size_rule, states_size
 from .steps import step_problems
 
 REQUIRED_CHECKS_ENV = "BRICKWRIGHT_REQUIRED_CHECKS"  # read by brickwright's validation
@@ -198,20 +207,7 @@ def build_prompt(
     With expert, it tells the builder to call ask_expert when validate fails."""
     rules = CHECK_OWNED_RULE + (f"\n{EXPERT_RULE}" if expert else "")
     if plan is None:
-        lines = []
-        for key in sorted(inventory.counts):
-            part_id, code = key
-            lines.append(f"{part_id} | {part_name(part_id)} | {color_label(code)} | {inventory.counts[key]}")
-        return (
-            f"{request}\n\n"
-            f"{ORIENTATION}\n\n"
-            "HARD RULE: use ONLY the parts listed below, in those colors, and never more "
-            "than the count given. Do not use any other part or color.\n"
-            "Format: part id | name | color | count owned\n"
-            + "\n".join(lines)
-            + "\n\n"
-            + rules
-        )
+        return f"{request}\n\n{ORIENTATION}\n\n{owned_parts_text(inventory)}\n\n{rules}"
 
     planned = [
         f"{part_id} | {part_name(part_id)} | {color_name(code)} | {n} | {inventory.owned((part_id, code))}"
@@ -239,6 +235,46 @@ def build_prompt(
         + ("\n".join(spares) if spares else "(none)")
         + "\n\n"
         + rules
+    )
+
+
+def owned_parts_text(inventory: Inventory) -> str:
+    """Every owned part, with the hard rule (the builder's prompt without a plan)."""
+    lines = []
+    for key in sorted(inventory.counts):
+        part_id, code = key
+        lines.append(f"{part_id} | {part_name(part_id)} | {color_label(code)} | {inventory.counts[key]}")
+    return (
+        "HARD RULE: use ONLY the parts listed below, in those colors, and never more "
+        "than the count given. Do not use any other part or color.\n"
+        "Format: part id | name | color | count owned\n" + "\n".join(lines)
+    )
+
+
+def direct_checklist(request: str, expansion: Expansion) -> Checklist:
+    """The review checklist without a plan: "looks like ..." plus the description's features."""
+    return Checklist(checklist=[f"looks like what was asked for: {request}", *expansion.features])
+
+
+def direct_prompt(request: str, inventory: Inventory, expansion: Expansion, checklist: Checklist) -> str:
+    """The builder's prompt without a plan (--no-plan): it designs and builds alone."""
+    items = "\n".join(f"{n}. {item}" for n, item in enumerate(checklist.checklist, start=1))
+    return (
+        f"{request}\n\n"
+        "There is no plan: design the model yourself and build it. Check your work with "
+        "validate and render as you go.\n\n"
+        f"Detailed description (follow it):\n{expansion.as_text()}\n\n"
+        "The finished build will be judged from its render against this checklist:\n"
+        f"{items}\n\n"
+        f"Units: x, y, width and depth are in studs; {UNITS}, the same units as "
+        "BrickLayer's add() position (x, y, z). A plate-thick step is 1/3 brick.\n"
+        f"{ORIENTATION}\n\n"
+        f"{size_rule(states_size(request))}\n"
+        f"{CAPACITY_RULES}\n"
+        "Plate-cells you may plan with, in plain bricks and plates:\n"
+        f"{capacity_table(inventory)}\n\n"
+        f"{owned_parts_text(inventory)}\n\n"
+        f"{CHECK_OWNED_RULE}"
     )
 
 
@@ -732,6 +768,7 @@ def design(
     expander=expand,
     from_record: str | None = None,
     use_expert: bool = True,
+    use_plan: bool = True,
 ) -> DesignResult:
     """Expand, plan, build and review a design, using only what is in the inventory file.
 
@@ -745,6 +782,10 @@ def design(
 
     from_record: skip Expand and Plan, and reuse that record's expansion and
     latest plan version (request may then be empty: the record's is used).
+
+    use_plan=False: no plan call, no re-plan, no plan.json; the builder designs
+    and builds alone (see the module docstring). Needs use_expand, and cannot be
+    combined with from_record (which reuses a plan). ask_expert is off.
 
     build_effort: the builder's reasoning effort (one of BUILD_EFFORTS; medium by
     default). Only the builder: the questions, description, plan, review and
@@ -768,6 +809,10 @@ def design(
     from brickwright.driver.loop import run_agent
     from brickwright.record import Record
 
+    if not use_plan and (from_record or not use_expand):
+        raise ValueError("no plan needs the expand step and cannot reuse a record's plan")
+    if not use_plan:
+        use_expert = False  # the builder works alone
     run = run or run_agent
     inventory_path = Path(inventory_path).resolve()
     inventory = load_inventory(inventory_path)
@@ -876,6 +921,12 @@ def design(
             ledger.add(expand_model, "expand", expanded.usage)
             expansion = expanded.expansion
             expansion_data = expansion_record(request, answers, expansion, ledger.step_cost("expand"))
+    if not use_plan:
+        plans = []
+        assert expansion is not None
+        plan = direct_checklist(request, expansion)  # what the review judges
+        prompt = direct_prompt(request, inventory, expansion, plan)
+    elif not from_record:
         budget.require("plan", "the plan")
         try:
             planned: PlanResult = planner(request, inventory, model=plan_model, expansion=expansion)
@@ -888,17 +939,19 @@ def design(
         ledger.add(plan_model, "plan", planned.usage)
         plan = planned.plan
         plans = [plan_version(1, "initial", plan, planned.cost_usd)]
-    if plan.sizing is not None:
-        print(plan.sizing.line)  # "Size: ..." (voxel.sizing); also saved in plan.json
-    prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan), expert=use_expert)
+    if use_plan:
+        if plan.sizing is not None:
+            print(plan.sizing.line)  # "Size: ..." (voxel.sizing); also saved in plan.json
+        prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan), expert=use_expert)
     expansion_text = expansion.as_text() if expansion is not None else None
 
     def new_record(record_prompt: str, from_id: str | None = None):
         rec = Record.create(config, prompt=record_prompt, from_id=from_id)
-        if plans[-1]["record_id"] is None:
-            plans[-1]["record_id"] = rec.id  # the first record built from this version
-        save_plan(rec, plan)
-        save_json(rec, PLANS_FILE, plans)
+        if use_plan:
+            if plans[-1]["record_id"] is None:
+                plans[-1]["record_id"] = rec.id  # the first record built from this version
+            save_plan(rec, plan)
+            save_json(rec, PLANS_FILE, plans)
         if expansion_data is not None:
             save_json(rec, EXPANSION_FILE, expansion_data)
         return rec
@@ -990,8 +1043,8 @@ def design(
             }
         )
         save_reviews(record, reviews)
-        if review_passed or review_round == MAX_REVIEW_ROUNDS:
-            break
+        if review_passed or review_round == MAX_REVIEW_ROUNDS or not use_plan:
+            break  # without a plan there is nothing to re-plan: keep the build
         if not budget.allows("revise", "build"):  # no point in a plan that cannot be built
             out_of_budget(f"plan revision {review_round}")
             break
@@ -1020,7 +1073,8 @@ def design(
         # A new plan starts from an empty build, not from the shape it replaces.
         record = new_record(feedback_prompt(review_problem(result.review), prompt, new_plan=True))
 
-    save_json(record, PLANS_FILE, plans)  # the full history, also when an earlier build was kept
+    if use_plan:
+        save_json(record, PLANS_FILE, plans)  # the full history, also when an earlier build was kept
     usage = ledger.by_model()
     save_json(
         record,
@@ -1034,6 +1088,7 @@ def design(
             "reused_from": reused_from or None,
             "build_model": build_model,
             "build_effort": build_effort,
+            "plan": use_plan,
         },
     )
 
@@ -1164,6 +1219,12 @@ def main(argv=None) -> int:
         help="reuse that record's expansion and latest plan; skip questions, expand and plan",
     )
     parser.add_argument(
+        "--no-plan",
+        action="store_true",
+        help="no plan call and no re-plan: the build model designs and builds alone from the "
+        "description, checklist and budget table, then one review (needs the expand step)",
+    )
+    parser.add_argument(
         "--no-expert",
         action="store_true",
         help="do not offer the builder the ask_expert tool (Sonnet, then Opus, fixes failed checks)",
@@ -1171,6 +1232,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if not args.request and not args.from_record:
         parser.error("the request is required unless --from-record is given")
+    if args.no_plan and (args.no_expand or args.from_record):
+        parser.error("--no-plan needs the expand step: it cannot be combined with --no-expand or --from-record")
     if argv is None and os.name == "nt" and not sys.flags.utf8_mode:
         # BrickWright writes its transcript with the Windows default encoding,
         # which cannot hold some characters. Run again in UTF-8 mode.
@@ -1196,6 +1259,7 @@ def main(argv=None) -> int:
             ask_user=not args.no_questions,
             from_record=args.from_record,
             use_expert=not args.no_expert,
+            use_plan=not args.no_plan,
         )
     except RecordError as err:
         print(f"Error: cannot reuse record {args.from_record}: {err}", file=sys.stderr)
