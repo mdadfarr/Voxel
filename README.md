@@ -185,8 +185,11 @@ once with the reason.
 API errors do not crash the run. Every call (questions, description, plan,
 revision, review, and each of the builder's calls) is retried up to 2 times,
 after 5 s and then 15 s, when it times out, hits a rate limit, cannot connect,
-or gets a server error. A call times out after 180 s (360 s for the plan and
-revision calls, which write long replies). If a call still fails after the
+or gets a server error. A builder call is the exception for timeouts: it is
+not retried after one, since a timed-out call may still be billed. A call times
+out after 180 s (360 s for the plan and revision calls, which write long
+replies, and 600 s for a builder call, which is not streamed and can think for
+minutes before it replies). If a call still fails after the
 retries, or the API says the credit balance is too low (not retried), the run
 stops cleanly: it keeps the last build that passed the gate, prints one line
 with the reason and the normal summary, and exits with code 5:

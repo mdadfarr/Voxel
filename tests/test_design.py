@@ -1137,6 +1137,10 @@ def api_timeout():
     return litellm.Timeout(message="Request timed out", model="m", llm_provider="anthropic")
 
 
+def server_error():
+    return litellm.InternalServerError(message="overloaded", model="m", llm_provider="anthropic")
+
+
 def credit_error():
     return litellm.BadRequestError(
         message="Your credit balance is too low to access the Anthropic API.", model="m", llm_provider="anthropic"
@@ -1211,11 +1215,11 @@ def builder_api(fake_seam):
 def test_builder_calls_are_retried_and_the_seam_put_back(builder_api, no_waits, tmp_path):
     from brickwright.driver import loop
 
-    run = seam_run(builder_api, [[api_timeout(), "reply"]])
+    run = seam_run(builder_api, [[server_error(), "reply"]])
     result = run_design(tmp_path, make_inventory(tmp_path), run)
     assert result.ok and not result.stopped and dz.exit_code(result) == 0
     assert no_waits == [5.0]
-    assert run.configs[0].request_timeout == dz.BUILD_CALL_TIMEOUT == 180
+    assert run.configs[0].request_timeout == dz.BUILD_CALL_TIMEOUT == 600
     assert loop.litellm_complete is builder_api.factory  # unwrapped after the run
 
 
@@ -1236,12 +1240,21 @@ def test_builder_failing_for_good_keeps_the_earlier_build(builder_api, no_waits,
 
 
 def test_builder_failing_in_the_first_round_keeps_nothing(builder_api, no_waits, tmp_path):
-    run = seam_run(builder_api, [[api_timeout()] * 3])
+    run = seam_run(builder_api, [[server_error()] * 3])
     result = run_design(tmp_path, make_inventory(tmp_path), run)
     assert not result.ok and dz.exit_code(result) == 5
-    assert result.stopped == "the builder call timed out 3 times (180 s each), in build round 1"
+    assert result.stopped.startswith("the builder call failed 3 times: ")
+    assert result.stopped.endswith(", in build round 1")
     assert dz.stopped_line(result).endswith("; no build passed the gate.")
     assert no_waits == [5.0, 15.0]
+
+
+def test_a_builder_timeout_is_not_retried(builder_api, no_waits, tmp_path):
+    run = seam_run(builder_api, [[api_timeout(), "reply"]])
+    result = run_design(tmp_path, make_inventory(tmp_path), run)
+    assert not result.ok and dz.exit_code(result) == 5
+    assert result.stopped == "the builder call timed out after 600 s (timeouts are not retried), in build round 1"
+    assert no_waits == []
 
 
 def run_main(tmp_path, monkeypatch, capsys, **design_kwargs):

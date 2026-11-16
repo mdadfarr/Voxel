@@ -155,14 +155,19 @@ def _short(err: BaseException) -> str:
     return f"{type(err).__name__}: {text[:200]}" if text else type(err).__name__
 
 
-def call_api(complete: Callable[..., Any], what: str, **kwargs: Any) -> Any:
+def call_api(complete: Callable[..., Any], what: str, *, retry_timeouts: bool = True, **kwargs: Any) -> Any:
     """complete(**kwargs), retried up to len(RETRY_WAITS) times on timeouts, rate
     limits, connection errors and server errors (5xx), with a wait before each retry.
+
+    retry_timeouts=False: a timeout is not retried (a timed-out call may still be
+    billed); the other transient errors still are.
 
     Raises CallFailed when the call still fails after the retries, when the API
     says the credit balance is too low (not retried), or on any other API error
     (not retried). Other exceptions (bugs) pass through unchanged.
     """
+    import litellm
+
     api_error, transient = _api_error_types()
     attempts = len(RETRY_WAITS) + 1
     for attempt in range(1, attempts + 1):
@@ -171,12 +176,14 @@ def call_api(complete: Callable[..., Any], what: str, **kwargs: Any) -> Any:
         except api_error as err:
             if is_credit_error(err):
                 raise CallFailed(f"the API says the credit balance is too low ({what} call)") from err
+            if not retry_timeouts and isinstance(err, litellm.Timeout):
+                limit = kwargs.get("timeout")
+                each = f" after {limit:g} s" if isinstance(limit, (int, float)) else ""
+                raise CallFailed(f"the {what} call timed out{each} (timeouts are not retried)") from err
             retryable = isinstance(err, transient) or (getattr(err, "status_code", 0) or 0) >= 500
             if not retryable:
                 raise CallFailed(f"the {what} call failed: {_short(err)}") from err
             if attempt == attempts:
-                import litellm
-
                 if isinstance(err, litellm.Timeout):
                     limit = kwargs.get("timeout")
                     each = f" ({limit:g} s each)" if isinstance(limit, (int, float)) else ""

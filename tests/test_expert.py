@@ -280,12 +280,16 @@ def timeout():
     return litellm.Timeout(message="Request timed out", model="m", llm_provider="anthropic")
 
 
-def test_ask_expert_with_voxels_hook_and_a_retried_timeout(expert_record, monkeypatch):
-    calls = fake_seam(monkeypatch, [timeout(), answer()])
+def server_error():
+    return litellm.InternalServerError(message="overloaded", model="m", llm_provider="anthropic")
+
+
+def test_ask_expert_with_voxels_hook_and_a_retried_server_error(expert_record, monkeypatch):
+    calls = fake_seam(monkeypatch, [server_error(), answer()])
     outcome = ask(expert_record)
     assert outcome.ok and "1. remove BLUE 3005 at (0,0,3)" in outcome.content
     assert "2. add BLUE 3005 at (0,0,1)" in outcome.content
-    assert len(calls) == 2  # the timeout was retried by Voxel's call_api
+    assert len(calls) == 2  # the server error was retried by Voxel's call_api
     system, packet = calls[1]["messages"][0]["content"][0]["text"], calls[1]["messages"][1]["content"]
     assert "PARTS THE USER OWNS" in system and "3001 | Brick 2 x 4 | RED | 4" in system
     assert "PLAN SECTION the problem is in: top" in packet
@@ -296,11 +300,12 @@ def test_ask_expert_with_voxels_hook_and_a_retried_timeout(expert_record, monkey
 
 
 def test_an_expert_that_keeps_timing_out_does_not_end_the_run(expert_record, monkeypatch):
-    fake_seam(monkeypatch, [timeout(), timeout(), timeout()])
+    calls = fake_seam(monkeypatch, [timeout(), answer()])
     outcome = ask(expert_record)
     assert not outcome.ok and outcome.content == "The expert is unavailable right now; fix this yourself."
+    assert len(calls) == 1  # timeouts are not retried
     [entry] = bw_expert.load_state(expert_record.path)["calls"]
-    assert entry["outcome"] == "unavailable" and "timed out 3 times" in entry["reason"]
+    assert entry["outcome"] == "unavailable" and "timeouts are not retried" in entry["reason"]
 
 
 def test_a_credit_error_from_the_expert_stops_the_run(expert_record, monkeypatch):

@@ -45,8 +45,9 @@ as out/build.unordered.ldr), and runs check_steps on that order as a safety
 check. Parts nothing holds up go back to the builder as a normal retry.
 
 API errors: every call (questions, expand, plan, revise, review and each builder
-call) is retried twice on timeouts, rate limits, connection and server errors.
-Calls time out after 180 s (360 s for plan and revise). A call that still fails,
+call) is retried twice on timeouts, rate limits, connection and server errors,
+except that a builder call is not retried on a timeout. Calls time out after
+180 s (360 s for plan and revise, 600 s for a builder call). A call that still fails,
 or a credit balance too low, stops the run cleanly: the last build that passed
 the gate is kept, the normal summary is printed, and the exit code is 5.
 
@@ -142,7 +143,9 @@ DEFAULT_MAX_COST = 1.5  # USD for the whole run: expand, plan, revise, every bui
 # single calls the largest cost seen for that step in this run is used if higher.
 STEP_FLOOR = {"questions": 0.02, "expand": 0.05, "plan": 0.10, "revise": 0.10, "build": 0.10, "review": 0.05}
 GATE_TIMEOUT = 60.0
-BUILD_CALL_TIMEOUT = DEFAULT_TIMEOUT  # seconds per builder call (BrickWright's request_timeout)
+# Seconds per builder call (BrickWright's request_timeout). Non-streaming, and an
+# effort-high first turn can think for minutes before it replies.
+BUILD_CALL_TIMEOUT = 600.0
 
 
 def load_env(path: str | Path = ".env") -> None:
@@ -553,17 +556,18 @@ def run_usage(run_report) -> tuple[Usage, bool]:
 @contextmanager
 def builder_retries():
     """While open, every BrickWright LLM call goes through call_api: retried on
-    timeouts, rate limits, connection and server errors, CallFailed when it still
-    fails. BrickWright's completion seam (driver.loop.litellm_complete) is
-    wrapped, and put back on exit. Subagents run in the same process, so they
-    are covered too."""
+    rate limits, connection and server errors, CallFailed when it still fails.
+    Timeouts are not retried: a timed-out call may still be billed, and at
+    BUILD_CALL_TIMEOUT each, retries could burn half an hour. BrickWright's
+    completion seam (driver.loop.litellm_complete) is wrapped, and put back on
+    exit. Subagents run in the same process, so they are covered too."""
     from brickwright.driver import loop
 
     original = loop.litellm_complete
 
     def retrying_complete():
         complete = original()
-        return lambda **kwargs: call_api(complete, "builder", **kwargs)
+        return lambda **kwargs: call_api(complete, "builder", retry_timeouts=False, **kwargs)
 
     loop.litellm_complete = retrying_complete
     try:
