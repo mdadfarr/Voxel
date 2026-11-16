@@ -237,7 +237,8 @@ Flags:
 - `--no-plan`: no plan call, no description call, no re-plan, no `plan.json`.
   The questions still run (skip them with `--no-expand`). The build model designs
   and builds alone from only the request, the answers as one line
-  (`Answers: color: RED; ...`), the orientation rule, every part you own and the
+  (`Answers: color: RED; ...`), the orientation rule, the display-pose rule
+  (stand upright, or sit on its base, as on a shelf), every part you own and the
   `check_owned` rule: no description, size rule, budget table or checklist.
   `ask_expert` is off. The gate runs as usual, then one review against the same
   fixed checklist for every build:
@@ -245,7 +246,7 @@ Flags:
   2. colors make sense: each part one clear color, no random stripes
   3. proportions are believable
   4. clean shape: outline reads clearly, no stray or sticking-out pieces
-  5. main features are visible in the front or top view
+  5. the model is in its natural display pose and its main features face the viewer
 
   The review fails if item 1 or item 4 fails, or 2 or more of items 2, 3 and 5
   fail (`review.json` keeps `failed_items` and the `rule`).

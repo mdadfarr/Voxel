@@ -43,7 +43,7 @@ NO_PLAN_ITEMS = (
     "colors make sense: each part one clear color, no random stripes",
     "proportions are believable",
     "clean shape: outline reads clearly, no stray or sticking-out pieces",
-    "main features are visible in the front or top view",
+    "the model is in its natural display pose and its main features face the viewer",
 )
 
 

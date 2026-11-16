@@ -1416,6 +1416,8 @@ def test_no_plan_builder_prompt_is_request_answers_and_parts(tmp_path):
     assert expander.calls == []  # no description call
     [prompt] = prompts
     assert prompt.startswith("a tower\nAnswers: color: RED; height: 6 bricks\n\nOrientation:")
+    assert f"{dz.ORIENTATION}\n{dz.DISPLAY_POSE}\n\nHARD RULE:" in prompt
+    assert dz.DISPLAY_POSE.startswith("Build the model in its natural display pose, the way it would stand")
     assert "3001 | Brick 2 x 4 | Red | 2" in prompt  # every owned part, full count
     assert prompt.endswith(dz.CHECK_OWNED_RULE)
     for gone in (
@@ -1453,6 +1455,7 @@ def test_no_plan_without_expand_builds_from_the_request_alone(tmp_path):
     result = run_design(tmp_path, make_inventory(tmp_path), run, use_plan=False, use_expand=False, asker=asker)
     assert result.ok and asker.calls == []
     assert prompts[0].startswith("a tower\n\nOrientation:") and "Answers:" not in prompts[0]
+    assert dz.DISPLAY_POSE in prompts[0]
     assert not (tmp_path / "rec" / result.record_id / dz.EXPANSION_FILE).exists()
 
 
@@ -1468,7 +1471,7 @@ FIXED_ITEMS = [
     "colors make sense: each part one clear color, no random stripes",
     "proportions are believable",
     "clean shape: outline reads clearly, no stray or sticking-out pieces",
-    "main features are visible in the front or top view",
+    "the model is in its natural display pose and its main features face the viewer",
 ]
 
 
@@ -1707,3 +1710,15 @@ def test_the_pipeline_has_no_review_hook(tmp_path):
     run_design(tmp_path, make_inventory(tmp_path), run)
     assert seen == [(0, None)]
     assert REVIEW_HOOK_ENV not in dz.os.environ
+
+
+def test_the_pipeline_prompt_has_no_display_pose_rule(tmp_path):
+    prompts = []
+    inner = fake_run_factory([2])
+
+    def run(record, config):
+        prompts.append(record.read_meta().prompt)
+        return inner(record, config)
+
+    run_design(tmp_path, make_inventory(tmp_path), run)
+    assert dz.DISPLAY_POSE not in prompts[0]

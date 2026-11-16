@@ -54,11 +54,12 @@ the gate is kept, the normal summary is printed, and the exit code is 5.
 No plan (--no-plan, use_plan=False): no plan call, no description call, no
 re-plan, no plan.json. The questions still run (unless --no-expand); the builder
 model designs and builds alone from the request, the answers as one line, the
-orientation, every owned part and the owned-parts check (direct_prompt). No
+orientation and display pose, every owned part and the owned-parts check
+(direct_prompt). No
 size rule, no budget table, no checklist in its prompt. ask_expert is off. The
 builder finalizes, then the build is reviewed against a fixed checklist
 (fixed_checklist: looks like the request, colors, proportions, clean shape,
-features visible) inside the run; it fails if item 1 or 4 fails or 2+ of items
+natural display pose) inside the run; it fails if item 1 or 4 fails or 2+ of items
 2, 3, 5 fail. A failed review gets one repair round in the same conversation
 (voxel.repair, through BrickWright's review hook): the builder edits build.py,
 validates and finalizes again. Then the gate and the review run once more. A
@@ -276,11 +277,21 @@ def answers_line(answers: list[Answer]) -> str:
     return "Answers: " + "; ".join(f"{a.question.id}: {a.value}" for a in answers)
 
 
+DISPLAY_POSE = (
+    "Build the model in its natural display pose, the way it would stand on a shelf: "
+    "things that stand (a guitar, a figure, a tower, a bottle) stand upright; things that "
+    "rest on their base (a car, a boat, a four-legged animal) sit on it."
+)
+
+
 def direct_prompt(request: str, inventory: Inventory, answers: str = "") -> str:
     """The builder's prompt without a plan (--no-plan): only the request, the answers
-    line, the orientation, every owned part and the owned-parts check."""
+    line, the orientation and display pose, every owned part and the owned-parts check."""
     asked = f"{request}\n{answers}" if answers else request
-    return f"{asked}\n\n{ORIENTATION}\n\n{owned_parts_text(inventory)}\n\n{CHECK_OWNED_RULE}"
+    return (
+        f"{asked}\n\n{ORIENTATION}\n{DISPLAY_POSE}\n\n"
+        f"{owned_parts_text(inventory)}\n\n{CHECK_OWNED_RULE}"
+    )
 
 
 # --- Layer 2: the independent gate --------------------------------------------
