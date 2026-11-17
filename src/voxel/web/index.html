@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Voxel: build from your sets</title>
+<link rel="stylesheet" href="/static/site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="mark" href="/"><i aria-hidden="true"><b></b><b></b><b></b><b></b></i>Voxel</a>
+    <nav aria-label="Pages">
+      <a href="/" aria-current="page">Build</a>
+      <a href="/guide">Guide</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="head">
+    <h1>Build something new from the sets you own</h1>
+    <p>Voxel designs a model that uses only your bricks, then writes the step-by-step manual.</p>
+  </div>
+
+  <form id="build-form" class="panel" autocomplete="off" novalidate>
+    <ol class="steps">
+      <li class="step">
+        <span class="num" aria-hidden="true">1</span>
+        <h2><label for="key">Your Anthropic key</label></h2>
+        <div class="body">
+          <input id="key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off"
+                 placeholder="sk-ant-..." aria-describedby="key-note">
+          <p class="note" id="key-note">Used for this one build and sent only to api.anthropic.com.
+            It is never saved, and this box is cleared when the build starts.</p>
+        </div>
+      </li>
+
+      <li class="step">
+        <span class="num" aria-hidden="true">2</span>
+        <h2><label for="search">Your sets</label></h2>
+        <div class="body">
+          <input id="search" type="search" autocomplete="off" spellcheck="false"
+                 placeholder="Type a set name or number" aria-controls="results" aria-describedby="search-status">
+          <p class="status" id="search-status" role="status"></p>
+          <ul class="results" id="results" hidden></ul>
+
+          <div class="tray">
+            <h3>My sets</h3>
+            <p class="empty" id="sets-empty">Search above and pick a set to add it here.</p>
+            <ul class="mysets" id="mysets"></ul>
+          </div>
+        </div>
+      </li>
+
+      <li class="step">
+        <span class="num" aria-hidden="true">3</span>
+        <h2><label for="request">What to build</label></h2>
+        <div class="body">
+          <textarea id="request" maxlength="500" placeholder="an electric guitar"></textarea>
+
+          <fieldset class="settings">
+            <legend>Build settings</legend>
+            <div class="setting">
+              <label for="model">Model</label>
+              <select id="model">
+                <option>Opus</option>
+                <option>Sonnet</option>
+                <option>Haiku</option>
+              </select>
+            </div>
+            <div class="setting">
+              <span class="label" id="effort-label">Effort</span>
+              <div class="segmented" role="radiogroup" aria-labelledby="effort-label">
+                <label><input type="radio" name="effort" value="low"><span>Low</span></label>
+                <label><input type="radio" name="effort" value="medium" checked><span>Medium</span></label>
+                <label><input type="radio" name="effort" value="high"><span>High</span></label>
+              </div>
+            </div>
+            <div class="setting">
+              <label for="max-cost">Max cost</label>
+              <div class="money"><span aria-hidden="true">$</span>
+                <input id="max-cost" type="number" inputmode="decimal" min="0.25" max="20" step="0.25" value="2.50">
+              </div>
+            </div>
+            <div class="setting">
+              <span class="label" id="questions-label">Clarifying questions</span>
+              <label class="switch">
+                <input id="questions" type="checkbox" role="switch" aria-labelledby="questions-label">
+                <span class="track" aria-hidden="true"></span>
+                <span class="state" id="questions-state">Off</span>
+              </label>
+            </div>
+          </fieldset>
+          <p class="note" id="settings-note">The model and effort apply to the builder. With questions on,
+            the build pauses to ask you a few things first.</p>
+
+          <div class="brickrow">
+            <button class="brick" id="build" type="submit">
+              <span class="studs" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+              <span id="build-label">Build</span>
+            </button>
+            <p class="limit" id="limit"></p>
+          </div>
+          <p class="status" id="form-status" role="alert"></p>
+        </div>
+      </li>
+    </ol>
+  </form>
+
+  <section class="panel result" id="result" aria-live="polite" hidden></section>
+</main>
+
+<script src="/static/site.js"></script>
+</body>
+</html>

@@ -103,6 +103,30 @@ def fetch_set_rows(set_num, key, *, cache_dir=CACHE_DIR, refresh=False, get_json
     return rows, False
 
 
+def search_sets(query, key, *, limit=8, get_json=http_get_json) -> list[dict]:
+    """Sets whose name or number matches `query`, newest first."""
+    from urllib.parse import urlencode
+
+    params = urlencode({"search": query, "page_size": limit, "ordering": "-year"})
+    page = get_json(f"{API_ROOT}/lego/sets/?{params}", key, f"sets matching {query!r}")
+    return [set_summary(row) for row in page.get("results", [])]
+
+
+def fetch_set(set_num, key, *, get_json=http_get_json) -> dict:
+    """Name, year, piece count and picture address of one set."""
+    return set_summary(get_json(f"{API_ROOT}/lego/sets/{set_num}/", key, f"set {set_num}"))
+
+
+def set_summary(row: dict) -> dict:
+    return {
+        "set_num": str(row.get("set_num", "")),
+        "name": str(row.get("name", "")),
+        "year": row.get("year"),
+        "num_parts": row.get("num_parts"),
+        "image": row.get("set_img_url") or "",
+    }
+
+
 @lru_cache(maxsize=None)
 def _catalog_knows(part_id: str) -> bool:
     try:

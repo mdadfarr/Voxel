@@ -1,6 +1,9 @@
-"""Local viewer: watch a design get built in 3D with the real LDraw part shapes.
+"""Local website and viewer.
 
 Run it:
+    python -m voxel.serve                         # the website: Build and Guide pages (voxel.site)
+
+The viewer: watch a design get built in 3D with the real LDraw part shapes.
     python -m voxel.serve records/<id>            # a record: its snapshots, then the final build
     python -m voxel.serve path/to/build.py        # one build
     python -m voxel.serve records/<id> --ldraw C:/Users/you/ldraw
@@ -168,12 +171,17 @@ def make_handler(payload: bytes, ldraw: Path, sounds: Path):
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python -m voxel.serve", description=__doc__.split("\n")[0])
-    parser.add_argument("path", help="a record folder or a build.py")
+    parser.add_argument("path", nargs="?", default=None, help="a record folder or a build.py; leave out for the website")
     parser.add_argument("--ldraw", default=None, help="your LDraw library folder")
     parser.add_argument("--sounds", default="sounds", help="folder with your own sound files (optional)")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)
+
+    if args.path is None:
+        from .site import run_site
+
+        return run_site(port=args.port, open_browser=not args.no_open)
 
     ldraw = find_ldraw(args.ldraw)
     if ldraw is None:

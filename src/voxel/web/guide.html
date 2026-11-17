@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Voxel guide</title>
+<link rel="stylesheet" href="/static/site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="mark" href="/"><i aria-hidden="true"><b></b><b></b><b></b><b></b></i>Voxel</a>
+    <nav aria-label="Pages">
+      <a href="/">Build</a>
+      <a href="/guide" aria-current="page">Guide</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="head">
+    <h1>How to use Voxel</h1>
+    <p>Four steps and a few minutes. The gallery below shows what past builds cost.</p>
+  </div>
+
+  <ol class="how panel">
+    <li>
+      <span class="num" aria-hidden="true">1</span>
+      <h3>Paste your key</h3>
+      <p>Your Anthropic key pays for the build. It is used once and never saved.</p>
+    </li>
+    <li>
+      <span class="num" aria-hidden="true">2</span>
+      <h3>Add your sets</h3>
+      <p>Search by name or number. Voxel builds only with the bricks in those sets.</p>
+    </li>
+    <li>
+      <span class="num" aria-hidden="true">3</span>
+      <h3>Say what to build</h3>
+      <p>One line works. More detail (colors, features, pose) gives you more control.</p>
+    </li>
+    <li>
+      <span class="num" aria-hidden="true">4</span>
+      <h3>Download the manual</h3>
+      <p>You get a picture, a review, and an .ldr manual you can open in any LDraw viewer.</p>
+    </li>
+  </ol>
+
+  <section class="section" aria-labelledby="compare">
+    <h2 id="compare">Compare past builds</h2>
+    <p>Each card is one build: what was asked, which model built it, what it cost and how many turns it took.</p>
+
+    <div class="filters" id="filters" hidden>
+      <fieldset id="filter-model"><legend>Model</legend></fieldset>
+      <fieldset id="filter-style"><legend>Request</legend></fieldset>
+    </div>
+    <p class="status" id="gallery-status" role="status">Loading builds.</p>
+    <ul class="cards" id="cards"></ul>
+  </section>
+</main>
+
+<script src="/static/site.js"></script>
+</body>
+</html>

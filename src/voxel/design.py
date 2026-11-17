@@ -146,6 +146,7 @@ DEFAULT_BUILD_EFFORT = "medium"  # the builder's reasoning effort (BrickWright's
 BUILD_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 PLAN_FILE = "plan.json"
 PLANS_FILE = "plans.json"  # every plan version, in the final record
+ONE_LINE_WORDS = 8  # a request this short is labelled "one-line" in usage.json
 USAGE_FILE = "usage.json"  # tokens and cost per model, in the final record
 STEP_GROUP = {  # usage step -> cost line part
     "questions": "expand",
@@ -167,6 +168,11 @@ GATE_TIMEOUT = 60.0
 # Seconds per builder call (BrickWright's request_timeout). Non-streaming, and an
 # effort-high first turn can think for minutes before it replies.
 BUILD_CALL_TIMEOUT = 600.0
+
+
+def prompt_style(request: str) -> str:
+    """How the person asked: "one-line" (8 words or fewer) or "detailed"."""
+    return "one-line" if len(request.split()) <= ONE_LINE_WORDS else "detailed"
 
 
 def load_env(path: str | Path = ".env") -> None:
@@ -1219,6 +1225,7 @@ def design(
             "build_model": build_model,
             "build_effort": build_effort,
             "plan": use_plan,
+            "prompt_style": prompt_style(request),
             **({"repair": repair_info} if not use_plan else {}),
         },
     )
