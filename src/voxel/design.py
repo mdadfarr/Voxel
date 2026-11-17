@@ -54,17 +54,21 @@ the gate is kept, the normal summary is printed, and the exit code is 5.
 No plan (--no-plan, use_plan=False): no plan call, no description call, no
 re-plan, no plan.json. The questions still run (unless --no-expand); the builder
 model designs and builds alone from the request, the answers as one line, the
-orientation and display pose, every owned part and the owned-parts check
-(direct_prompt). No
-size rule, no budget table, no checklist in its prompt. ask_expert is off. The
-builder finalizes, then the build is reviewed against a fixed checklist
-(fixed_checklist: looks like the request, colors, proportions, clean shape,
-natural display pose) inside the run; it fails if item 1 or 4 fails or 2+ of items
-2, 3, 5 fail. A failed review gets one repair round in the same conversation
-(voxel.repair, through BrickWright's review hook): the builder edits build.py,
-validates and finalizes again. Then the gate and the review run once more. A
-repair that fails the gate or does not finalize is undone. review.json keeps
-both reviews (stage "before repair" / "after repair"); usage.json has "repair".
+FACE/UP rule, every owned part and the owned-parts check (direct_prompt). No
+orientation rule, size rule, budget table or checklist in its prompt. ask_expert
+is off. The builder builds in whatever orientation is easiest and names it in
+build.py (FACE, UP); voxel.display turns the build for display only (the review
+render and out/build.display.ldr), never build.py, the gate or the manual. The
+build is reviewed against a fixed checklist (fixed_checklist: looks like the
+request, colors, proportions, no stray pieces, main features face the viewer);
+it fails if item 1 fails or 2+ of items 2 to 5 fail.
+
+With repair=True (--repair; off by default) a failed review gets one repair
+round in the same conversation (voxel.repair, through BrickWright's review
+hook): the builder edits build.py, validates and finalizes again. Then the gate
+and the review run once more. A repair that fails the gate or does not finalize
+is undone. review.json keeps both reviews (stage "before repair" / "after
+repair"); usage.json has "repair".
 
 The expert: design() turns on BrickWright's ask_expert tool (voxel.expert is its
 context hook). When the builder's validate fails, it asks the expert (Sonnet;
@@ -116,6 +120,7 @@ from .plan import (
     revise_plan,
     spare_set,
 )
+from .display import display_image, pose_note
 from .repair import RepairContext, build_sha, restore
 from .repair import active as repair_active
 from .review import (
@@ -277,21 +282,19 @@ def answers_line(answers: list[Answer]) -> str:
     return "Answers: " + "; ".join(f"{a.question.id}: {a.value}" for a in answers)
 
 
-DISPLAY_POSE = (
-    "Build the model in its natural display pose, the way it would stand on a shelf: "
-    "things that stand (a guitar, a figure, a tower, a bottle) stand upright; things that "
-    "rest on their base (a car, a boat, a four-legged animal) sit on it."
+FACE_UP_RULE = (
+    "Build in whatever orientation is easiest. In build.py, set two constants: FACE = the "
+    "axis the object's front face points to (e.g. \"+z\"), and UP = the axis that points to "
+    "the object's top (e.g. \"+y\" for a guitar's headstock)."
 )
 
 
 def direct_prompt(request: str, inventory: Inventory, answers: str = "") -> str:
     """The builder's prompt without a plan (--no-plan): only the request, the answers
-    line, the orientation and display pose, every owned part and the owned-parts check."""
+    line, the FACE/UP rule, every owned part and the owned-parts check. No
+    orientation rule: voxel.display turns the build for display from FACE and UP."""
     asked = f"{request}\n{answers}" if answers else request
-    return (
-        f"{asked}\n\n{ORIENTATION}\n{DISPLAY_POSE}\n\n"
-        f"{owned_parts_text(inventory)}\n\n{CHECK_OWNED_RULE}"
-    )
+    return f"{asked}\n\n{FACE_UP_RULE}\n\n{owned_parts_text(inventory)}\n\n{CHECK_OWNED_RULE}"
 
 
 # --- Layer 2: the independent gate --------------------------------------------
@@ -790,6 +793,7 @@ def design(
     gate=final_gate,
     planner=make_plan,
     renderer=render_build,
+    displayer=display_image,
     reviewer=run_review,
     reviser=revise_plan,
     use_expand=True,
@@ -801,6 +805,7 @@ def design(
     from_record: str | None = None,
     use_expert: bool = True,
     use_plan: bool = True,
+    repair: bool = False,
 ) -> DesignResult:
     """Expand, plan, build and review a design, using only what is in the inventory file.
 
@@ -818,7 +823,11 @@ def design(
     use_plan=False: no plan call, no description call, no re-plan, no plan.json;
     the builder designs and builds alone (see the module docstring), and the
     review uses the fixed checklist and its looser pass rule. Cannot be combined
-    with from_record (which reuses a plan). ask_expert is off.
+    with from_record (which reuses a plan). ask_expert is off. The review judges
+    the render turned by build.py's FACE and UP (displayer, voxel.display).
+
+    repair: without a plan, one repair round in the builder's conversation after
+    a failed review (voxel.repair). Off by default; ignored with a plan.
 
     build_effort: the builder's reasoning effort (one of BUILD_EFFORTS; medium by
     default). Only the builder: the questions, description, plan, review and
@@ -863,7 +872,8 @@ def design(
     }
     if records_dir is not None:
         kwargs["records_dir"] = Path(records_dir)
-    if not use_plan:  # one review inside the run, then at most one repair (voxel.repair)
+    repair = repair and not use_plan
+    if repair:  # one review inside the run, then at most one repair (voxel.repair)
         kwargs["max_critique_rounds"] = 1
     config = Config(**kwargs)
 
@@ -1007,11 +1017,12 @@ def design(
             gate=gate,
             inventory_path=inventory_path,
             review_estimate=budget.estimate("review"),
+            display=lambda rec, image: displayer(rec, image, config.render_timeout),
         )
-        if not use_plan
+        if repair
         else None
     )
-    repair_info: dict = {"ran": False}  # usage.json "repair"
+    repair_info: dict = {"ran": False, "enabled": repair}  # usage.json "repair"
     repair_note = ""
 
     def book_hook_reviews() -> Usage:
@@ -1092,6 +1103,7 @@ def design(
             entry["stage"] = stage
             entry["rule"] = pass_rule(plan)
             entry["failed_items"] = [v.index for v in result.review.failed()]
+            entry["pose"] = pose_note(Path(config.records_dir) / record_id / "build.py")
         return entry
 
     review_passed: bool | None = None
@@ -1134,6 +1146,10 @@ def design(
                 note, review_passed = why, None
                 warn(f"review skipped: {why}")
                 break
+            if not use_plan:  # judge the build turned by its FACE and UP (voxel.display)
+                image, shown_as_built = displayer(record, image, config.render_timeout)
+                if shown_as_built:
+                    warn(shown_as_built)
             try:
                 result = reviewer(plan, expansion_text, image, model=review_model)
             except ReviewError as err:
@@ -1223,7 +1239,7 @@ def design(
         review_report=failed_text if review_passed is not None else "",
         review_rule=pass_rule(plan) if not use_plan and review_passed is not None else "",
         review_items=review_items,
-        repair=repair_line_text(repair_info, reviews) if not use_plan else "",
+        repair=repair_line_text(repair_info, reviews) if repair else "",
         repair_note=repair_note,
         review_note=note,
         usage=tuple(usage),
@@ -1364,7 +1380,12 @@ def main(argv=None) -> int:
         action="store_true",
         help="no plan, no description, no re-plan: the build model designs and builds alone from "
         "the request, the question answers and the part list; reviewed against a fixed "
-        "checklist, with one repair round in the same conversation if the review fails",
+        "checklist, judged on the render turned by build.py's FACE and UP",
+    )
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="with --no-plan: one repair round in the builder's conversation if the review fails",
     )
     parser.add_argument(
         "--no-expert",
@@ -1376,6 +1397,8 @@ def main(argv=None) -> int:
         parser.error("the request is required unless --from-record is given")
     if args.no_plan and args.from_record:
         parser.error("--no-plan cannot be combined with --from-record (it reuses a plan)")
+    if args.repair and not args.no_plan:
+        parser.error("--repair needs --no-plan (the pipeline re-plans instead)")
     if argv is None and os.name == "nt" and not sys.flags.utf8_mode:
         # BrickWright writes its transcript with the Windows default encoding,
         # which cannot hold some characters. Run again in UTF-8 mode.
@@ -1402,6 +1425,7 @@ def main(argv=None) -> int:
             from_record=args.from_record,
             use_expert=not args.no_expert,
             use_plan=not args.no_plan,
+            repair=args.repair,
         )
     except RecordError as err:
         print(f"Error: cannot reuse record {args.from_record}: {err}", file=sys.stderr)

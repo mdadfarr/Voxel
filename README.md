@@ -237,30 +237,42 @@ Flags:
 - `--no-plan`: no plan call, no description call, no re-plan, no `plan.json`.
   The questions still run (skip them with `--no-expand`). The build model designs
   and builds alone from only the request, the answers as one line
-  (`Answers: color: RED; ...`), the orientation rule, the display-pose rule
-  (stand upright, or sit on its base, as on a shelf), every part you own and the
-  `check_owned` rule: no description, size rule, budget table or checklist.
-  `ask_expert` is off. The gate runs as usual, then one review against the same
-  fixed checklist for every build:
+  (`Answers: color: RED; ...`), the FACE/UP rule, every part you own and the
+  `check_owned` rule: no orientation rule, description, size rule, budget table
+  or checklist. `ask_expert` is off.
+
+  Display pose: the builder builds in whatever orientation is easiest and sets
+  two constants in `build.py`: `FACE` (the axis the object's front points to,
+  e.g. `"+z"`) and `UP` (the axis to its top, e.g. `"+y"` for a guitar's
+  headstock). Voxel (`voxel.display`) turns the build so FACE points to the
+  front view and UP up, for display only: `out/build.display.ldr` (open it in an
+  LDraw viewer) and `out/build.display.png` (the image the reviewer judges).
+  `build.py`, `out/build.ldr`, the gate and the manual are never changed. A
+  missing or invalid FACE/UP only warns: the build is shown and reviewed as
+  built (`review.json` keeps the `pose`).
+
+  The gate runs as usual, then one review against the same fixed checklist for
+  every build:
   1. looks like what was asked for ("<request>") to someone who only sees the picture
   2. colors make sense: each part one clear color, no random stripes
   3. proportions are believable
-  4. clean shape: outline reads clearly, no stray or sticking-out pieces
-  5. the model is in its natural display pose and its main features face the viewer
+  4. no stray or floating-looking pieces sticking out
+  5. main features face the viewer in the front view
 
-  The review fails if item 1 or item 4 fails, or 2 or more of items 2, 3 and 5
-  fail (`review.json` keeps `failed_items` and the `rule`).
-
-  Repair round: the first review runs inside the builder's run, through
-  BrickWright's review hook (`BRICKWRIGHT_REVIEW_HOOK`, set by Voxel; needs the
-  `ask-expert` fork). If it fails and at least $0.40 of `--max-cost` is left, the
-  failed items and the render go back to the builder in the same conversation:
-  it edits the existing `build.py`, validates and finalizes again. Then the gate
-  and the review run once more. One repair per run; the reviews and the repair
-  count in `--max-cost`. A repair that fails the gate or does not finalize is
-  undone (`out/build.before_repair.py` is put back). `review.json` keeps both
-  reviews (`stage`: `before repair`, `after repair`; `in run` when the first
-  passed), `usage.json` has `repair` (turns, cost, kept). Not with
+  The review fails if item 1 fails, or 2 or more of items 2 to 5 fail
+  (`review.json` keeps `failed_items` and the `rule`).
+- `--repair` (with `--no-plan`; off by default): one repair round. The first
+  review runs inside the builder's run, through BrickWright's review hook
+  (`BRICKWRIGHT_REVIEW_HOOK`, set by Voxel; needs the `ask-expert` fork). If it
+  fails and at least $0.40 of `--max-cost` is left, the failed items go back to
+  the builder in the same conversation, with BrickWright's render as built and
+  a line that maps the reviewer's turned view to `build.py`'s axes (FACE/UP).
+  The builder edits the existing `build.py`, validates and finalizes again. Then
+  the gate and the review run once more. One repair per run; the reviews and the
+  repair count in `--max-cost`. A repair that fails the gate or does not
+  finalize is undone (`out/build.before_repair.py` is put back). `review.json`
+  keeps both reviews (`stage`: `before repair`, `after repair`; `in run` when
+  the first passed), `usage.json` has `repair` (turns, cost, kept). Not with
   `--from-record`. Use it with `--build-model claude-opus-5-5 --max-cost 2.5`.
 
 ## Get an inventory from set numbers

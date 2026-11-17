@@ -5,14 +5,16 @@ after the builder finalizes and the build is rendered. The hook:
 
 1. runs Voxel's gate on build.py; if it fails there is nothing to review (the
    normal gate retry handles it);
-2. reviews the render against the fixed checklist (voxel.review), if the review
-   fits in what is left of the budget; the render is kept as
-   out/review.before_repair.png;
+2. reviews the render turned by build.py's FACE and UP (voxel.display) against
+   the fixed checklist (voxel.review), if the review fits in what is left of the
+   budget; the reviewed image is kept as out/review.before_repair.png;
 3. passed: done. Failed, a repair is left and the budget still has
    REPAIR_RESERVE after the review: backs up build.py as
    out/build.before_repair.py and returns the failed items as feedback.
-   BrickWright appends it (with the render) to the same conversation and runs
-   another builder pass, which edits build.py, validates and finalizes again.
+   BrickWright appends it (with its own render, as built, not turned) to the
+   same conversation and runs another builder pass, which edits build.py,
+   validates and finalizes again. The feedback states FACE and UP, so the
+   builder can map the reviewer's "front view" and "top" back to build.py's axes.
 
 There is one repair per design() run. The hook's state (the reviews it made, the
 repair) lives in the RepairContext that design() opens with active(); the run's
@@ -31,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .display import read_pose
 from .llm import CallFailed, Usage
 from .review import Checklist, ReviewError, ReviewResult, review_passes
 
@@ -46,12 +49,31 @@ def build_sha(build_path: str | Path) -> str:
     return hashlib.sha256(Path(build_path).read_bytes()).hexdigest()
 
 
-def repair_feedback(result: ReviewResult) -> str:
+def frame_note(build_path: str | Path) -> str:
+    """How the reviewer's view maps to build.py's axes, for the repair feedback."""
+    pose, why = read_pose(build_path)
+    if pose is None:
+        return (
+            f"The reviewer saw the build as built ({why}). The front view shows your +y "
+            "side, the top view your +z side."
+        )
+    if not pose.turned:
+        return f"Your build.py sets {pose.text()}: the reviewer saw it as built."
+    return (
+        f"Your build.py sets {pose.text()}. The reviewer saw the build turned for display: "
+        f"its front view shows your {pose.face} side, its top is your {pose.up} side. The "
+        "attached render shows the build as you built it, not turned."
+    )
+
+
+def repair_feedback(result: ReviewResult, frame: str = "") -> str:
     """The builder's next user turn after a failed review."""
     failed = "\n".join(f"- {v.item}: {v.reason}" for v in result.review.failed())
     return (
         "A reviewer judged your build's render (attached). These checklist items failed:\n"
         f"{failed}\n\n"
+        + (f"{frame}\n\n" if frame else "")
+        + 
         "Edit the existing build.py to fix only these. Keep everything else; do not start "
         "over. Then validate and finalize again."
     )
@@ -80,6 +102,7 @@ class RepairContext:
     gate: Callable[[Any, Any], tuple[bool, str]]
     inventory_path: Path
     review_estimate: float  # USD the budget must have for a review
+    display: Callable[[Any, Path], tuple[Path, str]] | None = None  # (record, render) -> (image, warning)
     repairs_left: int = 1
     reviews: list[Reviewed] = field(default_factory=list)
     unbooked: list[Usage] = field(default_factory=list)  # review usage design() has not booked
@@ -159,8 +182,13 @@ def review_hook(record, image_path: Path, budget_left: float):
         return HookResult(done=True)
     out = Path(record.path) / OUT_DIR
     out.mkdir(parents=True, exist_ok=True)
+    shown = Path(image_path)
+    if ctx.display is not None:
+        shown, warning = ctx.display(record, shown)
+        if warning:
+            ctx.notes.append(warning)
     image = out / BEFORE_IMAGE
-    shutil.copyfile(image_path, image)
+    shutil.copyfile(shown, image)
     try:
         result = ctx.reviewer(ctx.checklist, ctx.asked, image, model=ctx.model)
     except (ReviewError, CallFailed) as err:
@@ -182,7 +210,7 @@ def review_hook(record, image_path: Path, budget_left: float):
     )
     return HookResult(
         done=not repair,
-        feedback=repair_feedback(result) if repair else "",
+        feedback=repair_feedback(result, frame_note(record.build_path)) if repair else "",
         usage=_hook_usage(result.usage),
     )
 

@@ -30,9 +30,9 @@
     "semantic_hash": "ca859509cd120ae939bd52aeee9de424"
   },
   "src/voxel/design.py": {
-    "mtime": 1794790642.5102308,
-    "seen": 1794790765.282316,
-    "ast_hash": "7b8da5ce2e1e2c43546827e4b84428d5",
+    "mtime": 1794887942.027343,
+    "seen": 1794888221.372755,
+    "ast_hash": "096ddf6fbc6fa1d43ade3bef8da9b75d",
     "semantic_hash": ""
   },
   "src/voxel/expand.py": {
@@ -54,10 +54,10 @@
     "semantic_hash": "7c8d4f25306dede21df9ec3fe153d76e"
   },
   "src/voxel/llm.py": {
-    "mtime": 1794175820.4614718,
-    "seen": 1794630494.462573,
-    "ast_hash": "d34d82854c39f8ff0c2eeb6113810713",
-    "semantic_hash": "d34d82854c39f8ff0c2eeb6113810713"
+    "mtime": 1794806309.317879,
+    "seen": 1794806373.287273,
+    "ast_hash": "4c2682dbc110fe298a7ee7ebe2f5a9ab",
+    "semantic_hash": ""
   },
   "src/voxel/parts.py": {
     "mtime": 1794034072.7950654,
@@ -78,9 +78,9 @@
     "semantic_hash": "78cbfd0644b85d55df71c4d75bd60f11"
   },
   "src/voxel/review.py": {
-    "mtime": 1794790621.7062674,
-    "seen": 1794790765.282323,
-    "ast_hash": "f528af5244266b8c47f5122713fb4b27",
+    "mtime": 1794887964.0614085,
+    "seen": 1794888221.3727648,
+    "ast_hash": "e5f576884a6a532cdb3cd262bd61dbfe",
     "semantic_hash": ""
   },
   "src/voxel/sequence.py": {
@@ -113,22 +113,10 @@
     "ast_hash": "b087fe171ac89641d11f51442d4b9104",
     "semantic_hash": ""
   },
-  "INSTRUCTIONS.md": {
-    "mtime": 1794201440.803249,
-    "seen": 1794630494.4625878,
-    "ast_hash": "aee76843549046990e99ab275ecb0731",
-    "semantic_hash": "aee76843549046990e99ab275ecb0731"
-  },
   "README.md": {
-    "mtime": 1794728280.5679157,
-    "seen": 1794728329.564948,
-    "ast_hash": "6b6e330077712f355718b0e5169416c7",
-    "semantic_hash": ""
-  },
-  ".claude/settings.json": {
-    "mtime": 1794683023.7267833,
-    "seen": 1794711329.138678,
-    "ast_hash": "9509da5af748516e433dc11323b4e4a4",
+    "mtime": 1794888220.0318692,
+    "seen": 1794888221.372771,
+    "ast_hash": "3ef6210fa5390404fdf45489e493af72",
     "semantic_hash": ""
   },
   "src/voxel/capacity.py": {
@@ -141,6 +129,18 @@
     "mtime": 1794727918.1939497,
     "seen": 1794727978.794983,
     "ast_hash": "2a459161565475f9b9dedddeecf8a927",
+    "semantic_hash": ""
+  },
+  "src/voxel/repair.py": {
+    "mtime": 1794887954.7120123,
+    "seen": 1794888221.3727639,
+    "ast_hash": "d0886c5d8961b326baefb0d189d07a5b",
+    "semantic_hash": ""
+  },
+  "src/voxel/display.py": {
+    "mtime": 1794887964.0612025,
+    "seen": 1794888221.372756,
+    "ast_hash": "400f45867b2b2ecaafc01ac3c9684256",
     "semantic_hash": ""
   }
 }

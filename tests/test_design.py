@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1415,9 +1416,8 @@ def test_no_plan_builder_prompt_is_request_answers_and_parts(tmp_path):
     no_plan_design(tmp_path, run, expander=expander)
     assert expander.calls == []  # no description call
     [prompt] = prompts
-    assert prompt.startswith("a tower\nAnswers: color: RED; height: 6 bricks\n\nOrientation:")
-    assert f"{dz.ORIENTATION}\n{dz.DISPLAY_POSE}\n\nHARD RULE:" in prompt
-    assert dz.DISPLAY_POSE.startswith("Build the model in its natural display pose, the way it would stand")
+    assert prompt.startswith(f"a tower\nAnswers: color: RED; height: 6 bricks\n\n{dz.FACE_UP_RULE}\n\nHARD RULE:")
+    assert dz.FACE_UP_RULE.startswith("Build in whatever orientation is easiest. In build.py, set two constants:")
     assert "3001 | Brick 2 x 4 | Red | 2" in prompt  # every owned part, full count
     assert prompt.endswith(dz.CHECK_OWNED_RULE)
     for gone in (
@@ -1431,6 +1431,8 @@ def test_no_plan_builder_prompt_is_request_answers_and_parts(tmp_path):
         "PLAN:",
         "Spare parts",
         "ask_expert",
+        "Orientation:",
+        "natural display pose",
     ):
         assert gone not in prompt
 
@@ -1454,8 +1456,7 @@ def test_no_plan_without_expand_builds_from_the_request_alone(tmp_path):
     asker = fake_asker()
     result = run_design(tmp_path, make_inventory(tmp_path), run, use_plan=False, use_expand=False, asker=asker)
     assert result.ok and asker.calls == []
-    assert prompts[0].startswith("a tower\n\nOrientation:") and "Answers:" not in prompts[0]
-    assert dz.DISPLAY_POSE in prompts[0]
+    assert prompts[0].startswith(f"a tower\n\n{dz.FACE_UP_RULE}\n\n") and "Answers:" not in prompts[0]
     assert not (tmp_path / "rec" / result.record_id / dz.EXPANSION_FILE).exists()
 
 
@@ -1470,8 +1471,8 @@ FIXED_ITEMS = [
     'looks like what was asked for ("a tower") to someone who only sees the picture',
     "colors make sense: each part one clear color, no random stripes",
     "proportions are believable",
-    "clean shape: outline reads clearly, no stray or sticking-out pieces",
-    "the model is in its natural display pose and its main features face the viewer",
+    "no stray or floating-looking pieces sticking out",
+    "main features face the viewer in the front view",
 ]
 
 
@@ -1493,9 +1494,10 @@ def test_no_plan_reviews_against_the_fixed_checklist_once_and_keeps_the_build(tm
     assert reviser.calls == [] and len(run.calls) == 1  # no re-plan, no rebuild
     [entry] = reviews_in(tmp_path, result.record_id)
     assert entry["passed"] is False and entry["failed_items"] == [2, 5]
-    assert entry["rule"] == "items 1 and 4 must pass, at most 1 other(s) may fail" and entry["stage"] == "after run"
+    assert entry["rule"] == "item 1 must pass, at most 1 other(s) may fail" and entry["stage"] == "after run"
+    assert entry["pose"] == "none (build.py does not set FACE and UP); shown as built"
     assert dz.review_line(result).startswith(
-        "Review: FAILED after 1 round(s) (3 of 5 items; rule: items 1 and 4 must pass, at most 1 other(s) may fail):\n"
+        "Review: FAILED after 1 round(s) (3 of 5 items; rule: item 1 must pass, at most 1 other(s) may fail):\n"
     )
     assert dz.exit_code(result) == 3
 
@@ -1599,25 +1601,25 @@ def repairing_run(after=2, *, before=2, done_after=True, repair_cost=0.2, build_
     return run
 
 
-FAIL_SHAPE = [True, True, True, False, True]  # item 4 (clean shape) fails: must pass
+FAIL_LOOK = [False, True, True, True, True]  # item 1 (looks like it) fails: must pass
 ALL_PASS = [True] * 5
 
 
 def test_failed_review_gets_one_repair_in_the_same_run(tmp_path):
     run = repairing_run(after=1)
-    reviewer = fake_reviewer([FAIL_SHAPE, ALL_PASS])
-    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    reviewer = fake_reviewer([FAIL_LOOK, ALL_PASS])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0, repair=True)
 
     [call] = run.calls  # one builder run: the repair is inside it, no new record
     assert call["config"].max_critique_rounds == 1
     assert call["feedback"].startswith("A reviewer judged your build's render (attached).")
-    assert "- clean shape: outline reads clearly, no stray or sticking-out pieces: " in call["feedback"]
+    assert '- looks like what was asked for ("a tower") to someone who only sees the picture: ' in call["feedback"]
     assert "Edit the existing build.py to fix only these" in call["feedback"]
     assert len(reviewer.calls) == 2  # before and after the repair
     assert result.ok and result.review_passed is True and result.review_rounds == 2
 
     before, after = reviews_in(tmp_path, result.record_id)
-    assert (before["stage"], before["passed"], before["failed_items"]) == ("before repair", False, [4])
+    assert (before["stage"], before["passed"], before["failed_items"]) == ("before repair", False, [1])
     assert (after["stage"], after["passed"], after["failed_items"]) == ("after repair", True, [])
     assert before["image"].endswith("review.before_repair.png") and Path(before["image"]).exists()
     folder = tmp_path / "rec" / result.record_id
@@ -1636,7 +1638,7 @@ def test_failed_review_gets_one_repair_in_the_same_run(tmp_path):
 def test_passed_review_inside_the_run_is_not_repeated(tmp_path):
     run = repairing_run()
     reviewer = fake_reviewer([ALL_PASS])
-    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0, repair=True)
     assert run.calls[0]["feedback"] is None
     assert len(reviewer.calls) == 1  # the in-run review is reused for the same build.py
     [entry] = reviews_in(tmp_path, result.record_id)
@@ -1647,8 +1649,8 @@ def test_passed_review_inside_the_run_is_not_repeated(tmp_path):
 
 def test_there_is_only_one_repair(tmp_path):
     run = repairing_run(after=1)
-    reviewer = fake_reviewer([FAIL_SHAPE, FAIL_SHAPE])
-    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    reviewer = fake_reviewer([FAIL_LOOK, FAIL_LOOK])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0, repair=True)
     assert len(run.calls) == 1 and len(reviewer.calls) == 2
     assert result.review_passed is False and dz.exit_code(result) == 3
     assert [r["stage"] for r in reviews_in(tmp_path, result.record_id)] == ["before repair", "after repair"]
@@ -1656,8 +1658,8 @@ def test_there_is_only_one_repair(tmp_path):
 
 def test_a_repair_that_fails_the_gate_is_undone(tmp_path):
     run = repairing_run(after=3)  # 3 bricks, 2 owned: the gate fails
-    reviewer = fake_reviewer([FAIL_SHAPE])
-    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    reviewer = fake_reviewer([FAIL_LOOK])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0, repair=True)
     folder = tmp_path / "rec" / result.record_id
     assert result.ok and len(run.calls) == 1  # no gate retry: the old build is put back
     assert (folder / "build.py").read_text() == BUILD_SRC.format(n=2)
@@ -1669,8 +1671,8 @@ def test_a_repair_that_fails_the_gate_is_undone(tmp_path):
 
 def test_a_repair_that_does_not_finalize_is_undone(tmp_path):
     run = repairing_run(after=1, done_after=False)
-    reviewer = fake_reviewer([FAIL_SHAPE])
-    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    reviewer = fake_reviewer([FAIL_LOOK])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0, repair=True)
     assert (tmp_path / "rec" / result.record_id / "build.py").read_text() == BUILD_SRC.format(n=2)
     assert result.repair_note == "the repair did not finalize; kept the build from before it"
 
@@ -1679,10 +1681,10 @@ def test_no_repair_without_the_reserve(tmp_path):
     from voxel.repair import REPAIR_RESERVE
 
     run = repairing_run(after=1)
-    reviewer = fake_reviewer([FAIL_SHAPE])
+    reviewer = fake_reviewer([FAIL_LOOK])
     # Questions $0.02, build $0.10, review $0.03: less than the reserve is left.
     budget = 0.02 + 0.1 + 0.03 + REPAIR_RESERVE - 0.01
-    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=budget)
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=budget, repair=True)
     assert run.calls[0]["feedback"] is None and len(reviewer.calls) == 1
     assert result.review_passed is False and result.repair == "Repair: did not run"
     [entry] = reviews_in(tmp_path, result.record_id)
@@ -1692,7 +1694,7 @@ def test_no_repair_without_the_reserve(tmp_path):
 def test_no_review_inside_the_run_when_the_gate_fails(tmp_path):
     run = repairing_run(before=3)  # every build fails the gate: nothing to review
     reviewer = fake_reviewer([])
-    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0, repair=True)
     assert reviewer.calls == [] and not result.ok
     assert len(run.calls) == 3  # the normal gate retries
 
@@ -1712,7 +1714,7 @@ def test_the_pipeline_has_no_review_hook(tmp_path):
     assert REVIEW_HOOK_ENV not in dz.os.environ
 
 
-def test_the_pipeline_prompt_has_no_display_pose_rule(tmp_path):
+def test_the_pipeline_prompt_has_no_face_up_rule(tmp_path):
     prompts = []
     inner = fake_run_factory([2])
 
@@ -1721,4 +1723,132 @@ def test_the_pipeline_prompt_has_no_display_pose_rule(tmp_path):
         return inner(record, config)
 
     run_design(tmp_path, make_inventory(tmp_path), run)
-    assert dz.DISPLAY_POSE not in prompts[0]
+    assert dz.FACE_UP_RULE not in prompts[0] and dz.ORIENTATION in prompts[0]
+
+
+# --- --no-plan: FACE/UP display turn, --repair off by default, no smooth outlines -------
+
+
+def fake_displayer():
+    calls = []
+
+    def displayer(record, image, timeout):
+        calls.append({"record": record.id, "image": Path(image)})
+        turned = Path(image).with_name("build.display.png")
+        turned.write_bytes(b"turned png")
+        return turned, ""
+
+    displayer.calls = calls
+    return displayer
+
+
+def test_no_plan_review_judges_the_turned_render(tmp_path):
+    displayer = fake_displayer()
+    reviewer = fake_reviewer([ALL_PASS])
+    result, _, _ = no_plan_design(
+        tmp_path, fake_run_factory([2]), renderer=fake_renderer, displayer=displayer, reviewer=reviewer
+    )
+    [call] = displayer.calls
+    assert call["image"].name == "build.png"  # BrickWright's render, as built
+    assert reviewer.calls[0]["image"].name == "build.display.png"
+    assert result.review_passed is True
+
+
+def test_the_pipeline_review_is_not_turned(tmp_path):
+    displayer = fake_displayer()
+    reviewer = fake_reviewer([[True, True]])
+    run_design(
+        tmp_path, make_inventory(tmp_path), fake_run_factory([2]),
+        renderer=fake_renderer, displayer=displayer, reviewer=reviewer,
+    )
+    assert displayer.calls == [] and reviewer.calls[0]["image"].name == "build.png"
+
+
+def test_repair_is_off_by_default(tmp_path):
+    run = repairing_run(after=1)
+    reviewer = fake_reviewer([FAIL_LOOK])
+    result, _, _ = no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0)
+    [call] = run.calls
+    assert call["config"].max_critique_rounds == 0 and call["feedback"] is None
+    assert len(reviewer.calls) == 1 and result.review_passed is False
+    assert result.repair == ""
+    [entry] = reviews_in(tmp_path, result.record_id)
+    assert entry["stage"] == "after run"
+    repair = json.loads((tmp_path / "rec" / result.record_id / dz.USAGE_FILE).read_text())["repair"]
+    assert repair == {"ran": False, "enabled": False}
+
+
+def test_repair_feedback_says_how_the_reviewer_saw_the_build(tmp_path):
+    run = repairing_run(after=1)
+    reviewer = fake_reviewer([FAIL_LOOK, ALL_PASS])
+    no_plan_design(tmp_path, run, renderer=fake_renderer, reviewer=reviewer, max_cost=3.0, repair=True)
+    feedback = run.calls[0]["feedback"]
+    assert "The reviewer saw the build as built (build.py does not set FACE and UP)." in feedback
+
+
+def test_repair_frame_note_maps_the_turned_view_to_build_axes(tmp_path):
+    from voxel.repair import frame_note
+
+    build = tmp_path / "build.py"
+    build.write_text('FACE = "+z"\nUP = "+y"\n')
+    note = frame_note(build)
+    assert "Your build.py sets FACE=+z, UP=+y." in note
+    assert "its front view shows your +z side, its top is your +y side" in note
+    assert "The attached render shows the build as you built it, not turned." in note
+    build.write_text('FACE = "+y"\nUP = "+z"\n')
+    assert frame_note(build) == "Your build.py sets FACE=+y, UP=+z: the reviewer saw it as built."
+
+
+def test_repair_flag(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    got = {}
+
+    def fake_design(request, inventory, **kwargs):
+        got.update(kwargs)
+        return dz.DesignResult(True, "rec", None, 1, "")
+
+    monkeypatch.setattr(dz, "design", fake_design)
+    inv = str(make_inventory(tmp_path))
+    dz.main(["a tower", "--inventory", inv, "--no-plan"])
+    assert got["repair"] is False
+    dz.main(["a tower", "--inventory", inv, "--no-plan", "--repair"])
+    assert got["repair"] is True
+    with pytest.raises(SystemExit):
+        dz.main(["a tower", "--inventory", inv, "--repair"])  # the pipeline re-plans instead
+
+
+# Whole words only: "around", "ground" and "background" do not match.
+SMOOTH_WORDS = re.compile(r"\b(smooth\w*|round|rounded|rounding|curve\w*|curved)\b", re.IGNORECASE)
+
+
+def test_smooth_words_pattern_uses_word_boundaries():
+    assert SMOOTH_WORDS.findall("smooth, rounded outline; curves") == ["smooth", "rounded", "curves"]
+    assert SMOOTH_WORDS.findall("around the ground, background") == []
+
+
+def test_no_plan_never_asks_for_smooth_or_rounded_outlines(tmp_path):
+    """Scans every instruction text --no-plan sends: the builder prompt (request,
+    answers line, FACE_UP_RULE, the owned-parts rule, CHECK_OWNED_RULE), the review
+    prompt with the fixed checklist and the repair feedback with its frame note.
+    Part names in the owned-parts list are excluded: they name parts you own (e.g.
+    "Brick Round 2 x 2"), they do not ask for an outline."""
+    from voxel.repair import frame_note, repair_feedback
+    from voxel.review import Review, ReviewResult, Verdict, fixed_checklist, review_prompt
+
+    inventory = dz.load_inventory(make_inventory(tmp_path))
+    prompt = dz.direct_prompt("a tower", inventory, "Answers: color: RED")
+    parts = dz.owned_parts_text(inventory).split("\n")
+    instructions = "\n".join(line for line in prompt.split("\n") if line not in parts[1:])
+    checklist = fixed_checklist("a tower")
+    review = Review(
+        verdicts=[Verdict(index=n, item=i, passed=False, reason="r") for n, i in enumerate(checklist.checklist, 1)]
+    )
+    build = tmp_path / "build.py"
+    build.write_text('FACE = "+z"\nUP = "+y"\n')
+    texts = {
+        "builder prompt": instructions,
+        "review prompt": review_prompt(checklist, "a tower\nAnswers: color: RED"),
+        "repair feedback": repair_feedback(ReviewResult(review, 0.0, 1), frame_note(build)),
+    }
+    assert {name: SMOOTH_WORDS.findall(text) for name, text in texts.items()} == {name: [] for name in texts}

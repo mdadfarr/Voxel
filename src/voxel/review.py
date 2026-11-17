@@ -2,9 +2,10 @@
 
 With --no-plan there is no plan: the reviewer gets the fixed Checklist
 (fixed_checklist: "looks like ..." plus four general quality items) and the
-request with its answers, and judges the render against it the same way. Its
-pass rule (review_passes) is looser than a plan's: items 1 and 4 must pass, and
-at most one other item may fail.
+request with its answers, and judges the render against it the same way. The
+render is the build turned by its FACE and UP (voxel.display). Its pass rule
+(review_passes) is looser than a plan's: item 1 must pass, and at most one other
+item may fail.
 
 One LLM call (no tools, no loop) with the rendered image attached. For each
 checklist item in the plan it answers pass/fail with a short reason. The first
@@ -42,17 +43,16 @@ class Checklist(StrictModel):
 NO_PLAN_ITEMS = (
     "colors make sense: each part one clear color, no random stripes",
     "proportions are believable",
-    "clean shape: outline reads clearly, no stray or sticking-out pieces",
-    "the model is in its natural display pose and its main features face the viewer",
+    "no stray or floating-looking pieces sticking out",
+    "main features face the viewer in the front view",
 )
 
 
 def fixed_checklist(request: str) -> Checklist:
     """The same checklist for every --no-plan build. The review fails if item 1
-    (looks like it) or item 4 (clean shape) fails, or 2 or more of items 2, 3
-    and 5 fail."""
+    (looks like it) fails, or 2 or more of items 2 to 5 fail."""
     first = f'looks like what was asked for ("{request.strip()}") to someone who only sees the picture'
-    return Checklist(checklist=[first, *NO_PLAN_ITEMS], must_pass=[1, 4], max_failed=1)
+    return Checklist(checklist=[first, *NO_PLAN_ITEMS], must_pass=[1], max_failed=1)
 
 
 def review_passes(review: "Review", plan: "Plan | Checklist") -> bool:

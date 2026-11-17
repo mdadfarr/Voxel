@@ -139,7 +139,7 @@ def test_fixed_checklist_quotes_the_request_and_has_five_items():
     assert checklist.checklist[0] == (
         'looks like what was asked for ("make me a guitar") to someone who only sees the picture'
     )
-    assert checklist.must_pass == [1, 4] and checklist.max_failed == 1
+    assert checklist.must_pass == [1] and checklist.max_failed == 1
 
 
 @pytest.mark.parametrize(
@@ -147,10 +147,11 @@ def test_fixed_checklist_quotes_the_request_and_has_five_items():
     [
         ((True, True, True, True, True), True),
         ((False, True, True, True, True), False),  # item 1 must pass
-        ((True, True, True, False, True), False),  # item 4 (clean shape) must pass
-        ((True, False, True, True, True), True),  # one of items 2, 3, 5 may fail
+        ((True, True, True, False, True), True),  # one of items 2 to 5 may fail
+        ((True, False, True, True, True), True),
         ((True, True, True, True, False), True),
-        ((True, False, True, True, False), False),  # two of items 2, 3, 5 fail
+        ((True, False, True, True, False), False),  # two of items 2 to 5 fail
+        ((True, True, True, False, False), False),
     ],
 )
 def test_fixed_checklist_pass_rule(passed, ok):
@@ -162,6 +163,6 @@ def test_plan_and_default_checklist_need_every_item():
     plain = rv.Checklist(checklist=rv.fixed_checklist("a guitar").checklist)
     assert rv.review_passes(review, plain) is False
     assert rv.pass_rule(plain) == "every item must pass"
-    assert rv.pass_rule(rv.fixed_checklist("x")) == "items 1 and 4 must pass, at most 1 other(s) may fail"
+    assert rv.pass_rule(rv.fixed_checklist("x")) == "item 1 must pass, at most 1 other(s) may fail"
     one = rv.Checklist(checklist=["a", "b"], must_pass=[1], max_failed=1)
     assert rv.pass_rule(one) == "item 1 must pass, at most 1 other(s) may fail"
