@@ -1,0 +1,551 @@
+"""Plan a build before the builder agent runs.
+
+One LLM call (no tools, no loop) turns the request into a plan: a checklist made
+from the request, the sections of the object, and the parts it needs. The plan
+is checked against the inventory; if it is malformed, uses parts you do not own,
+or needs more fill than its budget (voxel.capacity: plate-cells per color, by wall
+thickness, minus a margin kept for the builder), the call is retried once with
+the error. The planner only ever sees the budget, not the full owned plate-cells.
+
+When the review fails, revise_plan() makes a new plan from the old one, the
+failed items and the render, checked the same way.
+
+Units match BrickLayer: x, y, width and depth in studs; z and height in bricks
+(1 brick = 3 plates), so a plate-thick step is 1/3 brick.
+
+The builder then gets the plan, the planned parts, and a "spare set" of small
+basic and shaped parts in the plan's colors, so it has room to fix things.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Literal
+
+import bricklayer as bl
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from .capacity import ANY, CAPACITY_RULES, capacity_table, check_capacity
+from .inventory import Inventory, PartKey, color_name, key_label
+from .llm import (
+    CallFailed,
+    HasUsage,
+    ReplyError,
+    StepError,
+    call_with_retry,
+    default_complete,
+    image_part,
+    load_json,
+)
+from .parts import SPARE_KINDS, part_kind, part_name, part_size
+from .sizing import measure, size_rule, states_size
+
+if TYPE_CHECKING:
+    from .expand import Expansion
+    from .review import Review
+
+DEFAULT_PLAN_MODEL = "claude-opus-5-5"
+MAX_TOKENS = 16384  # a plan is long; a cut-off reply is incomplete JSON
+PLAN_TIMEOUT = 360.0  # seconds per plan or revise call: a long plan takes a while to write
+MAX_SPARE_ROWS = 40
+UNITS = "z and height are in bricks (1 brick = 3 plates)"
+UNITS_HINT = f"{UNITS}; a plate is 1/3 brick, so use whole numbers or .333 / .667"
+# One definition of "front" for every prompt: the planner, revise, the builder
+# and the reviewer. BrickWright's front render looks at the build from large y
+# toward -y (checked with a test render), so the front is the +y side.
+ORIENTATION = (
+    "Orientation: the front of the model is its +y side (the largest y), the side the "
+    "front render shows; put front features there. The side render shows the -x side "
+    "(the smallest x)."
+)
+TILES_RULE = "Cover visible surfaces with tiles (smooth parts with no studs) for a clean look."
+
+
+def parse_color(value: str) -> int:
+    """LDraw color code for a plan color: a bricklayer Color name (RED) or a code ("4")."""
+    text = str(value).strip()
+    if text.isdigit():
+        return int(text)
+    try:
+        return bl.Color[text.upper()].ldraw_id
+    except KeyError:
+        raise ValueError(f"unknown color {value!r}") from None
+
+
+def bricks(value: float) -> float:
+    """Check a z or height in bricks lands on whole plates; normalize thirds to 3 decimals."""
+    plates = value * 3
+    if abs(plates - round(plates)) > 0.02:
+        raise ValueError(f"{value} is not a whole number of plates ({UNITS_HINT})")
+    whole = round(plates)
+    return whole // 3 if whole % 3 == 0 else round(whole / 3, 3)
+
+
+# --- The plan's shape ---------------------------------------------------------
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class PlanPart(StrictModel):
+    part: str
+    color: str
+    count: int = Field(gt=0)
+
+    @field_validator("color")
+    @classmethod
+    def _known_color(cls, value: str) -> str:
+        parse_color(value)
+        return value
+
+    @property
+    def key(self) -> PartKey:
+        return (self.part, parse_color(self.color))
+
+
+class Size(StrictModel):
+    width: int = Field(gt=0, description="studs, left to right")
+    depth: int = Field(gt=0, description="studs, front to back")
+    height: float = Field(gt=0, description="bricks (1 brick = 3 plates); thirds allowed")
+
+    @field_validator("height")
+    @classmethod
+    def _whole_plates(cls, value: float) -> float:
+        return bricks(value)
+
+
+class Position(StrictModel):
+    x: int = Field(description="studs")
+    y: int = Field(description="studs")
+    z: float = Field(description="bricks (1 brick = 3 plates) above the ground; thirds allowed")
+
+    @field_validator("z")
+    @classmethod
+    def _whole_plates(cls, value: float) -> float:
+        return bricks(value)
+
+
+class CellCount(StrictModel):
+    """Plate-cells (1 stud x 1 stud x 1 plate) a section fills with one color."""
+
+    color: str = Field(description='a Color name like RED, or "ANY" for cells that cannot be seen')
+    cells: int = Field(gt=0)
+
+    @field_validator("color")
+    @classmethod
+    def _known_color(cls, value: str) -> str:
+        name = value.strip().upper()
+        if name != ANY and name not in bl.Color.__members__:
+            raise ValueError(f'unknown color {value!r} (use a Color name like RED, or "ANY")')
+        return name
+
+
+class Section(StrictModel):
+    name: str
+    size: Size
+    position: Position
+    colors: list[str] = Field(min_length=1)
+    parts: list[PlanPart] = Field(min_length=1)
+    # The capacity fields (voxel.capacity). Optional so plans made before the check
+    # still load; parse_plan requires them in every new plan.
+    fill: Literal["solid", "shell"] | None = Field(
+        default=None, description="solid: the whole box; shell: only its four walls"
+    )
+    wall: int = Field(default=1, ge=1, description="studs; wall thickness of a shell")
+    empty: int = Field(default=0, ge=0, description="plate-cells of the box or ring left open")
+    cells: list[CellCount] | None = None
+
+    @field_validator("colors")
+    @classmethod
+    def _known_colors(cls, values: list[str]) -> list[str]:
+        for value in values:
+            parse_color(value)
+        return values
+
+
+class Sizing(StrictModel):
+    """How big the plan is and what limits it (voxel.sizing). Filled in by code
+    after the capacity check, never by the planner."""
+
+    width: int = Field(description="studs")
+    depth: int = Field(description="studs")
+    height: float = Field(description="bricks")
+    limited_by: str = Field(description="the color that uses the largest share of its budget")
+    utilization: int = Field(description="percent of that color's budget")
+    user_size: bool = Field(description="the request said the size, so it was not checked")
+    problem: str = Field(default="", description='"Too small ...", else empty')
+    line: str = Field(description='the "Size: ..." line')
+
+
+class Plan(StrictModel):
+    checklist: list[str] = Field(min_length=1)
+    sections: list[Section] = Field(min_length=1)
+    parts: list[PlanPart] = Field(min_length=1)
+    sizing: Sizing | None = None
+
+    @field_validator("checklist")
+    @classmethod
+    def _first_item_is_overall_look(cls, items: list[str]) -> list[str]:
+        if not items[0].strip().lower().startswith("looks like"):
+            raise ValueError('the first checklist item must start with "looks like"')
+        return items
+
+    @model_validator(mode="after")
+    def _sections_use_listed_parts(self) -> Plan:
+        listed = {p.key for p in self.parts}
+        for section in self.sections:
+            for p in section.parts:
+                if p.key not in listed:
+                    raise ValueError(
+                        f"section {section.name!r} uses {p.part} in {p.color}, "
+                        "which is missing from the top-level parts list"
+                    )
+        return self
+
+    def part_counts(self) -> Counter[PartKey]:
+        counts: Counter[PartKey] = Counter()
+        for p in self.parts:
+            counts[p.key] += p.count
+        return counts
+
+    def color_codes(self) -> set[int]:
+        codes = {p.key[1] for p in self.parts}
+        codes.update(parse_color(c) for s in self.sections for c in s.colors)
+        return codes
+
+    def color_order(self) -> list[int]:
+        """The plan's colors, most-used first (by planned pieces)."""
+        used: Counter[int] = Counter()
+        for (_, code), n in self.part_counts().items():
+            used[code] += n
+        return sorted(self.color_codes(), key=lambda code: (-used[code], code))
+
+
+def plan_errors(plan: Plan, inventory: Inventory) -> list[str]:
+    """Parts in the plan that are not owned, or not owned in that number."""
+    errors = []
+    for key, n in sorted(plan.part_counts().items()):
+        owned = inventory.owned(key)
+        if owned == 0:
+            errors.append(f"{key_label(key)} is not in the inventory")
+        elif n > owned:
+            errors.append(f"{key_label(key)}: plan uses {n}, owned {owned}")
+    return errors
+
+
+def spare_set(inventory: Inventory, plan: Plan, limit: int = MAX_SPARE_ROWS) -> dict[PartKey, int]:
+    """Owned spare parts in the plan's colors that the plan does not already use.
+
+    Spare kinds: plain bricks and plates, slopes, curved and round parts, tiles.
+    At most `limit` rows: taken round-robin over the plan's colors (most-used
+    color first), smallest parts first within each color.
+    """
+    planned = plan.part_counts()
+    colors = plan.color_order()
+    by_color: dict[int, list[tuple]] = {code: [] for code in colors}
+    for key, n in inventory.counts.items():
+        part_id, code = key
+        if n <= 0 or code not in by_color or key in planned:
+            continue
+        name = part_name(part_id)
+        if part_kind(name) in SPARE_KINDS:
+            by_color[code].append((*part_size(name), name, part_id, key))
+    queues = [sorted(by_color[code]) for code in colors]
+    picked: list[PartKey] = []
+    while len(picked) < limit and any(queues):
+        for queue in queues:
+            if queue and len(picked) < limit:
+                picked.append(queue.pop(0)[-1])
+    return {key: inventory.counts[key] for key in picked}
+
+
+# --- The planning calls -------------------------------------------------------
+
+
+class PlanError(StepError):
+    """The planner did not produce a usable plan, even after one retry."""
+
+
+@dataclass(frozen=True)
+class PlanResult(HasUsage):
+    plan: Plan
+    cost_usd: float
+    attempts: int
+    input_tokens: int = 0
+    output_tokens: int = 0
+    size_retried: bool = False  # the planner was sent back once because the plan was too small
+    size_warning: str = ""  # the size problem the kept plan still has
+
+
+EXAMPLE = {
+    "checklist": [
+        "looks like a red mailbox",
+        "is the body red?",
+        "does it have a white slot on the front?",
+    ],
+    "sections": [
+        {
+            "name": "body",
+            "size": {"width": 4, "depth": 4, "height": 4},
+            "position": {"x": 0, "y": 0, "z": 0},
+            "colors": ["RED"],
+            "parts": [{"part": "3001", "color": "RED", "count": 8}],
+            "fill": "solid",
+            "wall": 1,
+            "empty": 0,
+            "cells": [{"color": "RED", "cells": 192}],
+        }
+    ],
+    "parts": [{"part": "3001", "color": "RED", "count": 8}],
+}
+
+
+def expansion_rules(expansion: Expansion) -> str:
+    """What the planner must take from the detailed description."""
+    s = expansion.size
+    features = "\n".join(f"{n}. {f}" for n, f in enumerate(expansion.features, start=2))
+    return (
+        f"Detailed description (follow it):\n{expansion.as_text()}\n\n"
+        "Rules from the description:\n"
+        f"- Follow its overall size and the proportions between the parts. It is {s.width} "
+        f"studs wide, {s.depth} studs deep and {s.height} bricks tall, in the same units "
+        "as this plan.\n"
+        "- Each key feature must become its own checklist item, right after the first "
+        "(\"looks like ...\") item, in this order:\n"
+        f"{features}\n\n"
+    )
+
+
+def plan_format_and_rules(inventory: Inventory, user_size: bool = False) -> str:
+    """The reply format, rules and inventory, shared by make_plan and revise_plan.
+    user_size: the request states the size, so the plan keeps it."""
+    lines = [
+        f"{part_id} | {part_name(part_id)} | {color_name(code)} | {n}"
+        for (part_id, code), n in sorted(inventory.counts.items())
+        if n > 0
+    ]
+    return (
+        "Reply with ONE JSON object and nothing else, with these keys:\n"
+        "- checklist: yes/no questions to judge the finished build. The FIRST item is "
+        'always "looks like <the thing asked for>". Then one item for each detail the '
+        "request names (colors, parts of the object).\n"
+        "- sections: the parts of the object (for a guitar: body, neck, headstock). Each has "
+        "name, size {width, depth in studs; height in bricks}, position {x, y in studs; "
+        "z in bricks above the ground}, colors, and the parts it uses as {part, color, count}. "
+        "Each section also says how much it fills, in plate-cells (1 stud x 1 stud x 1 plate): "
+        'fill ("solid": the whole box; "shell": only its four walls, `wall` studs thick, open '
+        "at the top and bottom), cells (the plate-cells per color as {color, cells}; use color "
+        '"ANY" for cells that cannot be seen from outside) and empty (plate-cells of the box '
+        "or ring left open: openings, cutaways). cells + empty must equal the volume: a solid "
+        "is width x depth x height x 3; a shell is its ring of cells x height x 3. Split a "
+        "section when its parts differ in wall thickness or in whether they can be seen.\n"
+        "- parts: every {part, color, count} the whole plan uses, totalled over all sections.\n"
+        'Leave out "sizing": code fills it in.\n\n'
+        "Rules:\n"
+        f"- Units: x, y, width and depth are in studs; {UNITS_HINT}. This is the unit "
+        "BrickLayer's add() uses.\n"
+        f"- {ORIENTATION}\n"
+        "- Use ONLY parts and colors from the inventory below, and never more than the count owned.\n"
+        "- Write colors exactly as in the inventory (like RED).\n"
+        "- Use shaped parts (slopes, curved, round, tiles) for outlines and curves, not only "
+        "plain bricks.\n"
+        f"- {TILES_RULE}\n"
+        "- Follow the size and proportions in the description, if one is given.\n"
+        f"- {CAPACITY_RULES} A plan that does not fit is rejected.\n"
+        f"- {size_rule(user_size)}\n\n"
+        "Plate-cells you may plan with, in plain bricks and plates:\n"
+        f"{capacity_table(inventory)}\n\n"
+        f"Example of the shape:\n{json.dumps(EXAMPLE, indent=2)}\n\n"
+        "Inventory (part id | name | color | count owned):\n" + "\n".join(lines)
+    )
+
+
+def plan_prompt(request: str, inventory: Inventory, expansion: Expansion | None = None) -> str:
+    return (
+        "You plan LEGO builds. A separate builder will follow your plan, so be concrete.\n\n"
+        f"Request: {request}\n\n"
+        + (expansion_rules(expansion) if expansion is not None else "")
+        + plan_format_and_rules(inventory, states_size(request))
+    )
+
+
+def parse_plan(
+    text: str, inventory: Inventory, expansion: Expansion | None = None, *, user_size: bool = False
+) -> Plan:
+    """Parse and check a plan, and fill in its `sizing` (voxel.sizing). Raises
+    ValueError with a message meant for the planner. A plan whose size is off still
+    parses: its sizing.problem says so (never with user_size, a size from the request)."""
+    data = load_json(text)
+    try:
+        plan = Plan.model_validate(data)
+    except ValidationError as err:
+        raise ValueError(f"the JSON does not match the plan shape:\n{err}") from None
+    if expansion is not None:
+        needed = 1 + len(expansion.features)
+        if len(plan.checklist) < needed:
+            raise ValueError(
+                f"the checklist has {len(plan.checklist)} items but needs at least {needed}: "
+                f'"looks like ..." plus one item per key feature ({len(expansion.features)} features)'
+            )
+    errors = plan_errors(plan, inventory)
+    if errors:
+        raise ValueError("the plan uses parts you do not own:\n" + "\n".join(f"- {e}" for e in errors))
+    capacity = check_capacity(plan.model_dump(), inventory)
+    if not capacity.ok:
+        raise ValueError("the plan needs more than your budget of parts:\n" + capacity.report())
+    sizing = measure(plan.model_dump(), inventory, user_size=user_size).sizing
+    return plan.model_copy(update={"sizing": Sizing(**sizing.to_json())})
+
+
+def _plan_call(complete, model, messages, parse) -> PlanResult:
+    try:
+        plan, usage, attempts = call_with_retry(
+            complete or default_complete(),
+            model=model,
+            messages=messages,
+            parse=parse,
+            max_tokens=MAX_TOKENS,
+            what="plan",
+            schema=Plan,
+            timeout=PLAN_TIMEOUT,
+        )
+    except ReplyError as err:
+        raise PlanError.from_reply(err) from None
+    return PlanResult(plan, usage.cost_usd, attempts, usage.input_tokens, usage.output_tokens)
+
+
+def size_warning(message: str) -> None:
+    print(f"Warning: {message}", file=sys.stderr)
+
+
+def _sized_plan_call(complete, model, content, parse) -> PlanResult:
+    """A plan call, plus at most ONE more call when the plan is too small.
+
+    The size retry is separate from the retry for an unusable plan (each call has
+    its own). The planner gets its plan back with the "Too small" sentence. If
+    the plan is still too small, or the retry gives no usable plan, the
+    latest usable plan is kept and a warning is printed."""
+    first = _plan_call(complete, model, [{"role": "user", "content": content}], parse)
+    problem = first.plan.sizing.problem if first.plan.sizing else ""
+    if not problem:
+        return first
+    messages = [
+        {"role": "user", "content": content},
+        {"role": "assistant", "content": first.plan.model_dump_json(exclude={"sizing"}, exclude_none=True)},
+        {
+            "role": "user",
+            "content": f"{problem}\n\nThe plan above fits the parts, but it is smaller than they allow. Keep the "
+            "checklist. Reply with the complete corrected JSON plan and nothing else.",
+        },
+    ]
+    try:
+        second = _plan_call(complete, model, messages, parse)
+    except (PlanError, CallFailed) as err:
+        size_warning(f"the size retry gave no usable plan; keeping the first plan. {problem}")
+        return _add_usage(first, first.plan, err.usage, getattr(err, "attempts", 1), problem)
+    still = second.plan.sizing.problem if second.plan.sizing else ""
+    if still:
+        size_warning(f"the plan is still too small after one retry; keeping it. {still}")
+    return _add_usage(first, second.plan, second.usage, second.attempts, still)
+
+
+def _add_usage(first: PlanResult, plan: Plan, usage, attempts: int, warning: str) -> PlanResult:
+    return PlanResult(
+        plan,
+        first.cost_usd + usage.cost_usd,
+        first.attempts + attempts,
+        first.input_tokens + usage.input_tokens,
+        first.output_tokens + usage.output_tokens,
+        size_retried=True,
+        size_warning=warning,
+    )
+
+
+def make_plan(
+    request: str,
+    inventory: Inventory,
+    *,
+    expansion: Expansion | None = None,
+    model: str = DEFAULT_PLAN_MODEL,
+    complete: Callable[..., Any] | None = None,
+) -> PlanResult:
+    """Ask the model for a plan. Retries once with the error if the plan is unusable,
+    and once more if it is too small (voxel.sizing); a request that states a size
+    keeps it and is not size-checked.
+
+    With an expansion, the planner follows its description, size and proportions,
+    and turns each key feature into a checklist item.
+    """
+    user_size = states_size(request)
+    return _sized_plan_call(
+        complete,
+        model,
+        plan_prompt(request, inventory, expansion),
+        lambda text: parse_plan(text, inventory, expansion, user_size=user_size),
+    )
+
+
+def revise_prompt(old_plan: Plan, review: Review, expansion: Expansion | None, inventory: Inventory) -> str:
+    verdicts = "\n".join(
+        f"{v.index}. [{'pass' if v.passed else 'FAIL'}] {v.item}: {v.reason}" for v in review.verdicts
+    )
+    return (
+        "You plan LEGO builds. A builder built the plan below; the attached image is its "
+        "render (front, side, top and isometric views). A reviewer checked it against the "
+        "plan's checklist, and some items FAILED.\n\n"
+        "The plan itself is the likely cause. Revise the DESIGN so the failed items pass: "
+        "change sections, sizes, positions, proportions and parts as needed. Do not just "
+        "patch details. The builder will build your new plan from an empty build.\n\n"
+        f"Review:\n{verdicts}\n\n"
+        f"Old plan:\n{old_plan.model_dump_json(indent=2, exclude={'sizing'})}\n\n"
+        + (expansion_rules(expansion) if expansion is not None else "")
+        + "Keep the checklist EXACTLY the same: the same items, in the same order.\n\n"
+        + plan_format_and_rules(inventory, _user_size(old_plan))
+    )
+
+
+def _user_size(plan: Plan) -> bool:
+    """The plan's size came from the request, so a revision keeps it."""
+    return bool(plan.sizing and plan.sizing.user_size)
+
+
+def parse_revision(
+    text: str, old_plan: Plan, inventory: Inventory, expansion: Expansion | None
+) -> Plan:
+    plan = parse_plan(text, inventory, expansion, user_size=_user_size(old_plan))
+    old = [item.strip() for item in old_plan.checklist]
+    if [item.strip() for item in plan.checklist] != old:
+        raise ValueError(
+            "the checklist changed; keep it exactly the same as the old plan's:\n"
+            + "\n".join(f"- {item}" for item in old_plan.checklist)
+        )
+    return plan
+
+
+def revise_plan(
+    old_plan: Plan,
+    review: Review,
+    image_path: str | Path,
+    expansion: Expansion | None,
+    inventory: Inventory,
+    *,
+    model: str = DEFAULT_PLAN_MODEL,
+    complete: Callable[..., Any] | None = None,
+) -> PlanResult:
+    """A new plan after a failed review, from the old plan, the review and the render.
+
+    Checked like make_plan (shape, owned parts, features), and the checklist must
+    stay the same. Retries once with the error if the plan is unusable.
+    """
+    content = [
+        {"type": "text", "text": revise_prompt(old_plan, review, expansion, inventory)},
+        image_part(image_path),
+    ]
+    return _sized_plan_call(
+        complete, model, content, lambda text: parse_revision(text, old_plan, inventory, expansion)
+    )

@@ -29,6 +29,14 @@ def color_label(code: int) -> str:
     return f"color {code}"
 
 
+def color_name(code: int) -> str:
+    """bricklayer Color name (RED) for a code, as used in inventory.json and plans."""
+    for c in bl.Color:
+        if c.ldraw_id == code:
+            return c.name
+    return str(code)
+
+
 def key_label(key: PartKey) -> str:
     part_id, code = key
     return f"{color_label(code)} part {part_id}"

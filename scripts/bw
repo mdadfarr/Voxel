@@ -1,0 +1,8 @@
+#!/bin/bash
+# Run brickwright with Voxel's settings.
+cd "$(dirname "$0")/.."
+source .venv/bin/activate
+export VOXEL_INVENTORY="$PWD/inventory.json"
+export BRICKWRIGHT_REQUIRED_CHECKS="voxel.design:check_owned"
+export LDRAW_LIBRARY_PATH="$HOME/ldraw"
+exec brickwright "$@"

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Design LEGO builds from only the pieces you own."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["bricklayer-sdk", "brickwright", "mcp"]
+dependencies = ["bricklayer-sdk", "brickwright", "litellm", "mcp", "pydantic>=2"]
 
 [project.optional-dependencies]
 dev = ["pytest"]

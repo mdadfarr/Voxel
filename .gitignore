@@ -6,5 +6,12 @@ __pycache__/
 *.ldr
 .cache/
 inventory.json
-inventory.unusable.jsonrecords/
+inventory.real.json
+inventory.unusable.json
+records/
+runs/
 sounds/
+INSTRUCTIONS.md
+.DS_Store
+.claude/settings.local.json
+graphify-out/

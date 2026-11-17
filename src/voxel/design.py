@@ -1,6 +1,34 @@
 """Design a build with the BrickWright agent, using only parts you own.
 
-Two layers keep the agent honest:
+Flow: Expand -> Plan -> Build -> Review.
+
+Expand (voxel.expand, Opus): Voxel asks you at most 3 questions about what the
+request leaves open (empty answer = the default shown in brackets; never about
+size), then writes a detailed description: size, proportions, colors per part
+and key features. The size comes from the parts you own (voxel.sizing): as big as
+the tightest color's budget allows; a plan that is too small is sent back once. A request that states a size keeps it. After planning a
+"Size: ..." line is printed, and saved in plan.json as "sizing".
+It is saved as expansion.json in the record folder. --no-questions uses all
+defaults; --no-expand skips the step and plans from the short request.
+--from-record <id> skips Expand and Plan and reuses that record's expansion and
+latest plan, to compare builder models on the exact same plan.
+
+The summary splits the cost by step and by model (tokens in and out); the
+per-model usage is saved as usage.json in the final record.
+
+Then one planning call (voxel.plan, Opus by default) turns the request into a
+plan: a checklist, the sections of the object, and the owned parts it needs.
+The builder (Haiku by default) gets the plan, the planned parts and a spare set
+of basic bricks and plates, not the full inventory. The plan is saved as
+plan.json in the record folder.
+
+Last, once the build passes the gate, it is rendered and one review call
+(voxel.review, Opus) judges it against the plan's checklist. Failed items go
+back to the builder through the same retry path as the gate (max 2 reviews).
+Without an LDraw library there is no render, and the review is skipped with a
+warning. The reviews are saved as review.json in the record folder.
+
+Two layers keep the agent honest (both against the FULL inventory):
 
 1. Soft: the owned parts are listed in the prompt, and the agent's own
    run_tests() includes check_owned(tests), so it sees over-use as a test failure.
@@ -10,6 +38,44 @@ Two layers keep the agent honest:
    itself (final_gate). If it fails, the agent is run again from that build with
    the report (up to max_retries times).
 
+Build steps are computed in code, not by the builder: after the inventory
+check, the gate orders the parts bottom-up into pages of at most 12
+(voxel.sequence), writes them as out/build.ldr (the builder's own order is kept
+as out/build.unordered.ldr), and runs check_steps on that order as a safety
+check. Parts nothing holds up go back to the builder as a normal retry.
+
+API errors: every call (questions, expand, plan, revise, review and each builder
+call) is retried twice on timeouts, rate limits, connection and server errors,
+except that a builder call is not retried on a timeout. Calls time out after
+180 s (360 s for plan and revise, 600 s for a builder call). A call that still fails,
+or a credit balance too low, stops the run cleanly: the last build that passed
+the gate is kept, the normal summary is printed, and the exit code is 5.
+
+No plan (--no-plan, use_plan=False): no plan call, no description call, no
+re-plan, no plan.json. The questions still run (unless --no-expand); the builder
+model designs and builds alone from the request, the answers as one line, the
+FACE/UP rule, every owned part and the owned-parts check (direct_prompt). No
+orientation rule, size rule, budget table or checklist in its prompt. ask_expert
+is off. The builder builds in whatever orientation is easiest and names it in
+build.py (FACE, UP); voxel.display turns the build for display only (the review
+render and out/build.display.ldr), never build.py, the gate or the manual. The
+build is reviewed against a fixed checklist (fixed_checklist: looks like the
+request, colors, proportions, no stray pieces, main features face the viewer);
+it fails if item 1 fails or 2+ of items 2 to 5 fail.
+
+With repair=True (--repair; off by default) a failed review gets one repair
+round in the same conversation (voxel.repair, through BrickWright's review
+hook): the builder edits build.py, validates and finalizes again. Then the gate
+and the review run once more. A repair that fails the gate or does not finalize
+is undone. review.json keeps both reviews (stage "before repair" / "after
+repair"); usage.json has "repair".
+
+The expert: design() turns on BrickWright's ask_expert tool (voxel.expert is its
+context hook). When the builder's validate fails, it asks the expert (Sonnet;
+Opus after 5 tries on one problem, at most 3 Opus rescues per run) and applies
+its edits. Their cost counts in the budget and has its own rows on the Models
+line; every call is saved in expert.json in the record. --no-expert turns it off.
+
 Run it:
     python -m voxel.design "a small red tower" --inventory inventory.json
 """
@@ -17,23 +83,90 @@ Run it:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 import traceback
-from dataclasses import dataclass
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 
-import bricklayer as bl
+from pydantic import ValidationError
 
 from .check import CheckResult, check_build
-from .inventory import Inventory, color_label, load_inventory
+from .expand import (
+    DEFAULT_EXPAND_MODEL,
+    Answer,
+    Expansion,
+    ExpandError,
+    Question,
+    ask_questions,
+    expand,
+)
+from .inventory import Inventory, PartKey, color_label, color_name, load_inventory
+from .expert import CONTEXT_HOOK, EXPERT_RULE, INVENTORY_ENV
+from .llm import DEFAULT_TIMEOUT, CallFailed, Usage, call_api
+from .parts import part_name
+from .plan import (
+    DEFAULT_PLAN_MODEL,
+    ORIENTATION,
+    UNITS,
+    Plan,
+    PlanError,
+    PlanResult,
+    make_plan,
+    plan_errors,
+    revise_plan,
+    spare_set,
+)
+from .display import display_image, pose_note
+from .repair import RepairContext, build_sha, restore
+from .repair import active as repair_active
+from .review import (
+    DEFAULT_REVIEW_MODEL,
+    Review,
+    ReviewError,
+    fixed_checklist,
+    pass_rule,
+    review_passes,
+    review_report,
+)
+from .review import review as run_review
+from .sequence import sequence, stepped_build
+from .steps import step_problems
 
-INVENTORY_ENV = "VOXEL_INVENTORY"
 REQUIRED_CHECKS_ENV = "BRICKWRIGHT_REQUIRED_CHECKS"  # read by brickwright's validation
 OWNED_CHECK = "voxel.design:check_owned"
-DEFAULT_MODEL = "claude-haiku-5-5"
+OUT_DIR = "out"  # BrickWright's output folder in a record
+STEPPED_LDR = "build.ldr"  # the build in Voxel's step order
+UNORDERED_LDR = "build.unordered.ldr"  # the build in the builder's own order
+DEFAULT_MODEL = "claude-haiku-5-5"  # the build model
+DEFAULT_BUILD_EFFORT = "medium"  # the builder's reasoning effort (BrickWright's own default is high)
+BUILD_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+PLAN_FILE = "plan.json"
+PLANS_FILE = "plans.json"  # every plan version, in the final record
+USAGE_FILE = "usage.json"  # tokens and cost per model, in the final record
+STEP_GROUP = {  # usage step -> cost line part
+    "questions": "expand",
+    "expand": "expand",
+    "plan": "plan",
+    "revise": "plan",
+    "build": "build",
+    "expert": "expert",
+    "review": "review",
+}
+EXPANSION_FILE = "expansion.json"
+REVIEW_FILE = "review.json"
+MAX_REVIEW_ROUNDS = 2
+DEFAULT_MAX_COST = 1.5  # USD for the whole run: expand, plan, revise, every build round, review
+# The least each step is assumed to cost when checking the budget before it. For
+# single calls the largest cost seen for that step in this run is used if higher.
+STEP_FLOOR = {"questions": 0.02, "expand": 0.05, "plan": 0.10, "revise": 0.10, "build": 0.10, "review": 0.05}
 GATE_TIMEOUT = 60.0
+# Seconds per builder call (BrickWright's request_timeout). Non-streaming, and an
+# effort-high first turn can think for minutes before it replies.
+BUILD_CALL_TIMEOUT = 600.0
 
 
 def load_env(path: str | Path = ".env") -> None:
@@ -62,52 +195,161 @@ def check_owned(tests, inventory_path: str | Path | None = None) -> None:
     tests.check("only_owned_parts", result.ok, None if result.ok else result.report())
 
 
+def set_expert(on: bool) -> None:
+    """Turn BrickWright's ask_expert tool on (with Voxel's context hook) or off."""
+    from brickwright.tools.expert import EXPERT_CONTEXT_ENV
+
+    if on:
+        os.environ[EXPERT_CONTEXT_ENV] = CONTEXT_HOOK
+    else:
+        os.environ.pop(EXPERT_CONTEXT_ENV, None)
+
+
 def require_owned_check() -> None:
-    """Make BrickWright run check_owned as a required check on every validate/finalize."""
+    """Make BrickWright run check_owned as a required check on every validate/finalize.
+
+    Build steps are not a builder check: Voxel computes them after the gate."""
     current = [t.strip() for t in os.environ.get(REQUIRED_CHECKS_ENV, "").split(",") if t.strip()]
     if OWNED_CHECK not in current:
         os.environ[REQUIRED_CHECKS_ENV] = ",".join([*current, OWNED_CHECK])
 
 
-def part_name(part_id: str) -> str:
-    try:
-        return " ".join(bl.PartSpec(part_id).name.split())
-    except Exception:
-        return part_id
+CHECK_OWNED_RULE = (
+    "Your run_tests() must include `from voxel import check_owned` and a call "
+    "`check_owned(tests)`. Do not remove, weaken or work around it."
+)
 
 
-def build_prompt(request: str, inventory: Inventory) -> str:
+def build_prompt(
+    request: str,
+    inventory: Inventory,
+    plan: Plan | None = None,
+    spare: dict[PartKey, int] | None = None,
+    expert: bool = True,
+) -> str:
+    """The builder's prompt. With a plan, only the planned parts and the spare set are listed.
+    With expert, it tells the builder to call ask_expert when validate fails."""
+    rules = CHECK_OWNED_RULE + (f"\n{EXPERT_RULE}" if expert else "")
+    if plan is None:
+        return f"{request}\n\n{ORIENTATION}\n\n{owned_parts_text(inventory)}\n\n{rules}"
+
+    planned = [
+        f"{part_id} | {part_name(part_id)} | {color_name(code)} | {n} | {inventory.owned((part_id, code))}"
+        for (part_id, code), n in sorted(plan.part_counts().items())
+    ]
+    spares = [
+        f"{part_id} | {part_name(part_id)} | {color_name(code)} | {n}"
+        for (part_id, code), n in sorted((spare or {}).items())
+    ]
+    return (
+        f"{request}\n\n"
+        "Follow this plan. Its checklist is how the finished build will be judged; "
+        "its sections give each part of the object with size, position and colors.\n"
+        f"Units: x, y, width and depth are in studs; {UNITS}, the same units as "
+        "BrickLayer's add() position (x, y, z). A plate-thick step is 1/3 brick.\n"
+        f"{ORIENTATION}\n"
+        f"PLAN:\n{plan.model_dump_json(indent=2)}\n\n"
+        "HARD RULE: use ONLY the parts listed below (planned parts and spare parts), "
+        "in those colors, and never more than the count owned. Do not use any other "
+        "part or color. Colors are bricklayer Color names (RED means bl.Color.RED).\n\n"
+        "Planned parts (part id | name | color | planned | owned):\n"
+        + "\n".join(planned)
+        + "\n\nSpare parts, to fix problems the plan did not foresee "
+        "(part id | name | color | owned):\n"
+        + ("\n".join(spares) if spares else "(none)")
+        + "\n\n"
+        + rules
+    )
+
+
+def owned_parts_text(inventory: Inventory) -> str:
+    """Every owned part, with the hard rule (the builder's prompt without a plan)."""
     lines = []
     for key in sorted(inventory.counts):
         part_id, code = key
         lines.append(f"{part_id} | {part_name(part_id)} | {color_label(code)} | {inventory.counts[key]}")
     return (
-        f"{request}\n\n"
         "HARD RULE: use ONLY the parts listed below, in those colors, and never more "
         "than the count given. Do not use any other part or color.\n"
-        "Format: part id | name | color | count owned\n"
-        + "\n".join(lines)
-        + "\n\nYour run_tests() must include `from voxel import check_owned` and a call "
-        "`check_owned(tests)`. Do not remove, weaken or work around it."
+        "Format: part id | name | color | count owned\n" + "\n".join(lines)
     )
+
+
+def answers_line(answers: list[Answer]) -> str:
+    """The question answers as one short line ("" when there are none)."""
+    if not answers:
+        return ""
+    return "Answers: " + "; ".join(f"{a.question.id}: {a.value}" for a in answers)
+
+
+FACE_UP_RULE = (
+    "Build in whatever orientation is easiest. In build.py, set two constants: FACE = the "
+    "axis the object's front face points to (e.g. \"+z\"), and UP = the axis that points to "
+    "the object's top (e.g. \"+y\" for a guitar's headstock)."
+)
+
+
+def direct_prompt(request: str, inventory: Inventory, answers: str = "") -> str:
+    """The builder's prompt without a plan (--no-plan): only the request, the answers
+    line, the FACE/UP rule, every owned part and the owned-parts check. No
+    orientation rule: voxel.display turns the build for display from FACE and UP."""
+    asked = f"{request}\n{answers}" if answers else request
+    return f"{asked}\n\n{FACE_UP_RULE}\n\n{owned_parts_text(inventory)}\n\n{CHECK_OWNED_RULE}"
 
 
 # --- Layer 2: the independent gate --------------------------------------------
 
 
+NOT_HELD_UP = (
+    "These parts are not held up: each part must touch the ground, or be clipped to "
+    "or rest on a part that is held up. Fix or remove them:"
+)
+
+
+@dataclass(frozen=True)
+class Ordered:
+    """Voxel's step order for one build: the parts nothing holds up, or the LDraw files."""
+
+    problems: list[str]
+    pages: int = 0
+    stepped_ldr: str = ""  # the build in page order, a 0 STEP after each page
+    unordered_ldr: str = ""  # the build in the builder's own order
+
+
+def order_build(build) -> Ordered:
+    """Compute the build steps (voxel.sequence), then check them with step_problems."""
+    from bricklayer import to_ldraw
+
+    if not build.flattened_placements:
+        return Ordered(["the build has no parts"])
+    seq = sequence(build)
+    if seq.unplaced:
+        return Ordered(seq.unplaced)
+    stepped = stepped_build(build, seq.pages)
+    # The safety check on the computed order. A floating part here would be a
+    # Voxel bug, but the builder can still fix it by holding the part up.
+    problems = [line.split(": ", 1)[-1].removesuffix(" floats") for line in step_problems(stepped)]
+    if problems:
+        return Ordered(problems)
+    return Ordered([], len(seq.pages), to_ldraw(stepped), to_ldraw(build))
+
+
 def _gate_worker(build_path: str, inventory_path: str):
-    """Runs in a child process. Returns a CheckResult, or an error string."""
+    """Runs in a child process. Returns (CheckResult, Ordered), or an error string."""
     try:
         from brickwright.tools import build_execution
 
         build = build_execution.create_build(build_path)
-        return check_build(build, load_inventory(inventory_path))
+        return check_build(build, load_inventory(inventory_path)), order_build(build)
     except BaseException:
         return traceback.format_exc()[-2000:]
 
 
 def final_gate(build_path: str | Path, inventory_path: str | Path) -> tuple[bool, str]:
-    """Check a finished build.py against the inventory. Returns (ok, report)."""
+    """Check a finished build.py against the inventory, and compute its build steps.
+
+    On success the record's out/build.ldr holds the build in Voxel's step order,
+    and out/build.unordered.ldr the builder's own order. Returns (ok, report)."""
     from brickwright.tools import build_execution
 
     try:
@@ -118,17 +360,90 @@ def final_gate(build_path: str | Path, inventory_path: str | Path) -> tuple[bool
         return False, f"Inventory gate could not run the build: {err}"
     if isinstance(outcome, str):
         return False, f"Inventory gate could not build build.py:\n{outcome}"
-    assert isinstance(outcome, CheckResult)
-    return outcome.ok, "Inventory check passed." if outcome.ok else outcome.report()
+    inventory_result, ordered = outcome
+    assert isinstance(inventory_result, CheckResult) and isinstance(ordered, Ordered)
+    if inventory_result.ok and not ordered.problems:
+        out = Path(build_path).parent / OUT_DIR
+        out.mkdir(parents=True, exist_ok=True)
+        (out / UNORDERED_LDR).write_text(ordered.unordered_ldr, encoding="utf-8")
+        (out / STEPPED_LDR).write_text(ordered.stepped_ldr, encoding="utf-8")
+        return True, f"Inventory check passed; build steps computed ({ordered.pages} pages)."
+    parts = [] if inventory_result.ok else [inventory_result.report()]
+    if ordered.problems:
+        parts.append(NOT_HELD_UP + "\n" + "\n".join(f"  - {p}" for p in ordered.problems))
+    return False, "\n".join(parts)
 
 
-def feedback_prompt(report: str) -> str:
-    return (
-        "Your build.py failed Voxel's independent inventory check:\n"
-        f"{report}\n\n"
-        "Fix build.py so it uses only the owned parts and counts from the original "
-        "list, keep check_owned(tests) in run_tests(), and keep the design."
+def feedback_prompt(problem: str, base_prompt: str, *, new_plan: bool = False) -> str:
+    """Prompt for a retry round, after the gate or the review failed.
+
+    A retry is a fresh conversation, so it repeats the full build prompt
+    (request, plan, planned parts, spare set) first. `problem` says what failed:
+    gate_problem(report) or review_problem(review).
+
+    new_plan: the plan above was revised after a failed review, and build.py
+    starts empty. Otherwise build.py holds the earlier build of the same plan.
+    """
+    rules = (
+        "It must use only the parts and counts listed above. "
+        "Keep check_owned(tests) in run_tests()."
     )
+    if new_plan:
+        return (
+            f"{base_prompt}\n\n"
+            f"PREVIOUS ATTEMPT: your earlier build {problem}\n\n"
+            "The plan above is a NEW plan, revised because of that review. build.py "
+            "starts empty: build the new plan from scratch, using the reasons above to "
+            f"avoid the same problems. {rules}"
+        )
+    return (
+        f"{base_prompt}\n\n"
+        "PREVIOUS ATTEMPT: build.py already holds your earlier build, but it "
+        f"{problem}\n\n"
+        f"Fix these problems in build.py. {rules} Keep following the plan."
+    )
+
+
+def gate_problem(report: str) -> str:
+    return f"failed Voxel's independent checks (inventory, and parts held up):\n{report}"
+
+
+def review_problem(result: Review) -> str:
+    return "failed the visual review. These checklist items failed:\n" + review_report(result)
+
+
+# --- Review: render the build and judge it against the checklist ---------------
+
+
+def render_build(record, config) -> tuple[Path | None, str]:
+    """Render the record's build to a PNG. Returns (image, "") or (None, why not)."""
+    try:
+        from brickwright.tools.rendering import render, render_available
+
+        if not render_available():
+            return None, "no LDraw library found (set LDRAW_LIBRARY_PATH in .env)"
+        # BrickWright's render rewrites out/build.ldr from build.py, in the
+        # builder's order; put the gate's stepped version back afterwards.
+        stepped_path = Path(record.path) / OUT_DIR / STEPPED_LDR
+        stepped = stepped_path.read_text(encoding="utf-8") if stepped_path.exists() else None
+        try:
+            report = render(record, config)
+        finally:
+            if stepped is not None:
+                stepped_path.write_text(stepped, encoding="utf-8")
+    except Exception as err:
+        return None, f"render failed: {err}"
+    if not report.ok or report.image_path is None:
+        return None, f"render failed: {report.error}"
+    return Path(report.image_path), ""
+
+
+def warn(message: str) -> None:
+    print(f"Warning: {message}", file=sys.stderr)
+
+
+def save_reviews(record, reviews: list[dict]) -> Path:
+    return save_json(record, REVIEW_FILE, reviews)
 
 
 # --- The outer loop -----------------------------------------------------------
@@ -136,62 +451,954 @@ def feedback_prompt(report: str) -> str:
 
 @dataclass(frozen=True)
 class DesignResult:
-    ok: bool
+    ok: bool  # the kept build passed the gate (inventory, parts held up)
+    record_id: str  # "" when the run stopped before any build
+    build_path: Path | None
+    rounds: int  # builder runs, over all gate retries and review rounds
+    report: str  # the gate report
+    expand_cost_usd: float = 0.0
+    plan_cost_usd: float = 0.0
+    build_cost_usd: float = 0.0
+    review_cost_usd: float = 0.0
+    expert_cost_usd: float = 0.0  # ask_expert calls (Sonnet, Opus) made during the build
+    review_passed: bool | None = None  # None: not reviewed (skipped, or the gate failed)
+    review_rounds: int = 0
+    review_report: str = ""  # failed items of the last review
+    review_rule: str = ""  # without a plan: the looser pass rule, in words
+    review_items: str = ""  # without a plan: "4 of 5" items passed in the last review
+    repair: str = ""  # without a plan: the repair round, in one line
+    repair_note: str = ""  # the repair was undone (failed the gate, or did not finalize)
+    review_note: str = ""  # why the review was skipped, or that an earlier build was kept
+    usage: tuple[dict, ...] = ()  # per model: model, input_tokens, output_tokens, cost_usd, steps
+    reused_from: str = ""  # with --from-record: "plan vN and expansion from <id>"
+    max_cost: float = DEFAULT_MAX_COST  # the run's budget
+    budget_note: str = ""  # "ran out before review round 2" when the budget stopped the run
+    stopped: str = ""  # why an API call stopped the run (after its retries, or no credit)
+    build_model: str = ""
+    build_effort: str = ""  # the builder's reasoning effort
+
+    @property
+    def cost_usd(self) -> float:
+        return (
+            self.expand_cost_usd
+            + self.plan_cost_usd
+            + self.build_cost_usd
+            + self.expert_cost_usd
+            + self.review_cost_usd
+        )
+
+
+@dataclass
+class UsageLedger:
+    """Tokens and cost per (model, step), in order of first use."""
+
+    rows: dict[tuple[str, str], Usage] = field(default_factory=dict)
+    largest: dict[str, float] = field(default_factory=dict)  # step -> most one call cost
+
+    def add(self, model: str, step: str, usage: Usage) -> None:
+        self.rows[(model, step)] = self.rows.get((model, step), Usage()) + usage
+        self.largest[step] = max(self.largest.get(step, 0.0), usage.cost_usd)
+
+    def step_cost(self, group: str) -> float:
+        return sum(u.cost_usd for (_, step), u in self.rows.items() if STEP_GROUP[step] == group)
+
+    @property
+    def total_cost(self) -> float:
+        return sum(u.cost_usd for u in self.rows.values())
+
+    def by_model(self) -> list[dict]:
+        models: dict[str, dict] = {}
+        for (model, step), u in self.rows.items():
+            row = models.setdefault(
+                model, {"model": model, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "steps": []}
+            )
+            row["input_tokens"] += u.input_tokens
+            row["output_tokens"] += u.output_tokens
+            row["cost_usd"] += u.cost_usd
+            if step not in row["steps"]:
+                row["steps"].append(step)
+        return list(models.values())
+
+
+class BudgetError(Exception):
+    """The budget ran out before any build was made. cost_usd: spent until then."""
+
+    def __init__(self, message: str, cost_usd: float) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
+
+
+@dataclass
+class Budget:
+    """One USD cap for the whole run, checked before each step."""
+
+    total: float
+    ledger: UsageLedger
+
+    @property
+    def spent(self) -> float:
+        return self.ledger.total_cost
+
+    @property
+    def remaining(self) -> float:
+        return self.total - self.spent
+
+    def estimate(self, step: str) -> float:
+        if step == "build":  # BrickWright caps a build round itself, at what is left
+            return STEP_FLOOR[step]
+        return max(STEP_FLOOR[step], self.ledger.largest.get(step, 0.0))
+
+    def allows(self, *steps: str) -> bool:
+        return self.remaining >= sum(self.estimate(step) for step in steps)
+
+    def require(self, step: str, before: str) -> None:
+        """Raise BudgetError if `step` does not fit; for steps before any build."""
+        if not self.allows(step):
+            raise BudgetError(
+                f"the budget (${self.total:.2f}) ran out before {before}: ${self.spent:.3f} "
+                f"spent, ${max(self.remaining, 0):.3f} left. No build was made.",
+                self.spent,
+            )
+
+
+def run_usage(run_report) -> tuple[Usage, bool]:
+    """Tokens and cost of one builder run. False when BrickWright could not price it all;
+    the cost is then the known part (a lower bound)."""
+    u = getattr(run_report, "usage", None)
+    cost = getattr(u, "cost_usd", None)
+    known = cost is not None
+    if not known:
+        cost = getattr(u, "known_cost_usd", 0.0) or 0.0
+    tokens = [getattr(u, name, 0) or 0 for name in ("prompt_tokens", "completion_tokens")]
+    return Usage(int(tokens[0]), int(tokens[1]), float(cost)), known
+
+
+@contextmanager
+def builder_retries():
+    """While open, every BrickWright LLM call goes through call_api: retried on
+    rate limits, connection and server errors, CallFailed when it still fails.
+    Timeouts are not retried: a timed-out call may still be billed, and at
+    BUILD_CALL_TIMEOUT each, retries could burn half an hour. BrickWright's
+    completion seam (driver.loop.litellm_complete) is wrapped, and put back on
+    exit. Subagents run in the same process, so they are covered too."""
+    from brickwright.driver import loop
+
+    original = loop.litellm_complete
+
+    def retrying_complete():
+        complete = original()
+        return lambda **kwargs: call_api(complete, "builder", retry_timeouts=False, **kwargs)
+
+    loop.litellm_complete = retrying_complete
+    try:
+        yield
+    finally:
+        loop.litellm_complete = original
+
+
+def expert_usage(record) -> list[tuple[str, Usage]]:
+    """The ask_expert calls of one builder run, per model (from its expert.json)."""
+    from brickwright.tools.expert import usage_by_model
+
+    return [
+        (model, Usage(row["input_tokens"], row["output_tokens"], row["cost_usd"]))
+        for model, row in usage_by_model(record.path).items()
+    ]
+
+
+def expert_rescues(record) -> int:
+    """Rescue-model calls made in one builder run."""
+    from brickwright.tools.expert import load_state, rescues_used
+
+    return rescues_used(load_state(record.path))
+
+
+def add_round_usage(ledger, build_model: str, record, used: Usage, booked: Usage = Usage()) -> None:
+    """One builder run: BrickWright's total includes the expert calls, so they go on
+    their own rows (step "expert") and the rest counts as build. `booked`: what the
+    caller already put on other rows (the in-run reviews), also not build."""
+    experts = expert_usage(record)
+    for model, usage in experts:
+        ledger.add(model, "expert", usage)
+    spent = sum((usage for _, usage in experts), booked)
+    ledger.add(
+        build_model,
+        "build",
+        Usage(
+            max(0, used.input_tokens - spent.input_tokens),
+            max(0, used.output_tokens - spent.output_tokens),
+            max(0.0, used.cost_usd - spent.cost_usd),
+        ),
+    )
+
+
+def interrupted_usage(record) -> Usage:
+    """What a builder run that raised used: BrickWright saves it in meta.json."""
+    try:
+        meta = record.read_meta()
+    except Exception:
+        return Usage()
+    return run_usage(meta)[0]
+
+
+class RecordError(ValueError):
+    """--from-record cannot use that record."""
+
+
+@dataclass(frozen=True)
+class Reused:
     record_id: str
-    build_path: Path
-    rounds: int
-    cost_usd: float
-    report: str
+    request: str
+    plan: Plan
+    plan_version: int
+    expansion: Expansion | None
+    expansion_data: dict | None
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        raise RecordError(f"{path} could not be read: {err}") from None
+
+
+def load_record(records_dir: str | Path, record_id: str, inventory: Inventory) -> Reused:
+    """The expansion and latest plan version of an earlier record, checked for reuse."""
+    folder = Path(records_dir) / record_id
+    if not folder.is_dir():
+        raise RecordError(f"record {record_id!r} not found in {records_dir}")
+    plans_path = folder / PLANS_FILE
+    if not plans_path.exists():
+        hint = ""
+        if (folder / PLAN_FILE).exists():
+            hint = (
+                " It has a plan.json but no plans.json, so it was made before z and height "
+                "moved from plates to bricks, and its plan cannot be reused."
+            )
+        raise RecordError(f"{plans_path} not found.{hint}")
+    history = _read_json(plans_path)
+    if not isinstance(history, list) or not history or not isinstance(history[-1], dict) or "plan" not in history[-1]:
+        raise RecordError(f"{plans_path} has no plan versions")
+    latest = history[-1]
+    version = latest.get("version", len(history))
+    try:
+        plan = Plan.model_validate(latest["plan"])
+    except ValidationError as err:
+        raise RecordError(f"{plans_path}: plan version {version} is not a valid plan:\n{err}") from None
+    errors = plan_errors(plan, inventory)
+    if errors:
+        raise RecordError(
+            f"{plans_path}: plan version {version} uses parts not in your current inventory:\n"
+            + "\n".join(f"- {e}" for e in errors)
+        )
+
+    expansion, data = None, None
+    expansion_path = folder / EXPANSION_FILE
+    if expansion_path.exists():
+        data = _read_json(expansion_path)
+        try:
+            size = {k: v for k, v in data["size"].items() if k != "height_unit"}
+            expansion = Expansion.model_validate(
+                {"description": data["description"], "size": size, "features": data["features"]}
+            )
+        except (KeyError, TypeError, AttributeError, ValidationError) as err:
+            raise RecordError(f"{expansion_path} is not a valid expansion: {err}") from None
+
+    request = (data or {}).get("request") or ""
+    if not request and (folder / "meta.json").exists():
+        meta = _read_json(folder / "meta.json")
+        request = str(meta.get("prompt", "")).split("\n\n")[0].strip() if isinstance(meta, dict) else ""
+    if not request:
+        raise RecordError(f"could not find the request in {record_id}; pass it on the command line")
+    return Reused(record_id, request, plan, version, expansion, data)
+
+
+def collect_answers(questions: list[Question], ask=input, interactive: bool = True) -> list[Answer]:
+    """Ask each question on the terminal. An empty answer (or no input) means the default."""
+    answers = []
+    for q in questions:
+        options = f" ({', '.join(q.options)})" if q.options else ""
+        line = f"{q.text}{options} [{q.default}]"
+        typed = ""
+        if interactive:
+            try:
+                typed = ask(line + " ").strip()
+            except EOFError:
+                typed = ""
+        else:
+            print(f"{line} (default)")
+        answers.append(Answer(q, typed or q.default, typed=bool(typed)))
+    return answers
+
+
+def answers_record(request: str, answers: list[Answer], cost_usd: float) -> dict:
+    """expansion.json without a plan: the questions and answers, no description."""
+    return {
+        "request": request,
+        "questions": [a.question.model_dump() for a in answers],
+        "answers": [a.to_json() for a in answers],
+        "cost_usd": cost_usd,
+    }
+
+
+def expansion_record(
+    request: str, answers: list[Answer], expansion: Expansion, cost_usd: float
+) -> dict:
+    return {
+        "request": request,
+        "questions": [a.question.model_dump() for a in answers],
+        "answers": [a.to_json() for a in answers],
+        "description": expansion.description,
+        "size": {**expansion.size.model_dump(), "height_unit": "bricks (1 brick = 3 plates)"},
+        "features": expansion.features,
+        "cost_usd": cost_usd,
+    }
+
+
+def save_json(record, name: str, data) -> Path:
+    path = Path(record.path) / name
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def plan_version(version: int, reason: str, plan: Plan, cost_usd: float) -> dict:
+    """One entry of plans.json. record_id is filled in by the first record built from it."""
+    return {
+        "version": version,
+        "reason": reason,
+        "record_id": None,
+        "cost_usd": cost_usd,
+        "plan": plan.model_dump(exclude_none=True),
+    }
+
+
+def save_plan(record, plan: Plan) -> Path:
+    path = Path(record.path) / PLAN_FILE
+    path.write_text(plan.model_dump_json(indent=2, exclude_none=True) + "\n", encoding="utf-8")
+    return path
 
 
 def design(
     request,
     inventory_path,
     *,
-    model=None,
-    max_cost=0.5,
+    build_model=None,
+    build_effort=DEFAULT_BUILD_EFFORT,
+    plan_model=DEFAULT_PLAN_MODEL,
+    review_model=DEFAULT_REVIEW_MODEL,
+    max_cost=DEFAULT_MAX_COST,
     max_retries=2,
     records_dir=None,
     run=None,
     gate=final_gate,
+    planner=make_plan,
+    renderer=render_build,
+    displayer=display_image,
+    reviewer=run_review,
+    reviser=revise_plan,
+    use_expand=True,
+    ask_user=True,
+    ask=input,
+    expand_model=DEFAULT_EXPAND_MODEL,
+    asker=ask_questions,
+    expander=expand,
+    from_record: str | None = None,
+    use_expert: bool = True,
+    use_plan: bool = True,
+    repair: bool = False,
 ) -> DesignResult:
-    """Design a build from the request, using only what is in the inventory file."""
+    """Expand, plan, build and review a design, using only what is in the inventory file.
+
+    Flow: Expand (questions, then a detailed description; skipped when
+    use_expand is False; defaults used without asking when ask_user is False)
+    -> Plan -> Build until the gate passes (max_retries retries, each continuing
+    from the previous build) -> render -> Review. If review items fail, the plan
+    is revised (reviser) and the builder starts again from an empty build with
+    the new plan and the review's reasons (max MAX_REVIEW_ROUNDS reviews). If that
+    rebuild cannot pass the gate, the last build that passed it is kept.
+
+    from_record: skip Expand and Plan, and reuse that record's expansion and
+    latest plan version (request may then be empty: the record's is used).
+
+    use_plan=False: no plan call, no description call, no re-plan, no plan.json;
+    the builder designs and builds alone (see the module docstring), and the
+    review uses the fixed checklist and its looser pass rule. Cannot be combined
+    with from_record (which reuses a plan). ask_expert is off. The review judges
+    the render turned by build.py's FACE and UP (displayer, voxel.display).
+
+    repair: without a plan, one repair round in the builder's conversation after
+    a failed review (voxel.repair). Off by default; ignored with a plan.
+
+    build_effort: the builder's reasoning effort (one of BUILD_EFFORTS; medium by
+    default). Only the builder: the questions, description, plan, review and
+    expert calls are not changed by it.
+
+    max_cost is one budget for the whole run. Before each step Voxel checks what
+    is left; each build round gets the rest as BrickWright's max_cost. When it
+    runs out, the run stops and keeps the last build that passed the gate
+    (DesignResult.budget_note says where it stopped).
+
+    Raises RecordError if from_record cannot be used (before any LLM call),
+    ExpandError or PlanError if no usable reply comes back, and BudgetError if the
+    budget runs out before the first build; their cost_usd is everything spent
+    until then.
+
+    An API call that fails for good (after its retries, or no credit) does not
+    raise: the run stops, keeps the last build that passed the gate (none if it
+    stopped earlier) and returns with DesignResult.stopped saying why.
+    """
     from brickwright.config import Config
     from brickwright.driver.loop import run_agent
     from brickwright.record import Record
 
+    if not use_plan and from_record:
+        raise ValueError("no plan cannot reuse a record's plan")
+    if not use_plan:
+        use_expert = False  # the builder works alone
     run = run or run_agent
     inventory_path = Path(inventory_path).resolve()
     inventory = load_inventory(inventory_path)
     os.environ[INVENTORY_ENV] = str(inventory_path)  # the agent's child processes inherit this
     require_owned_check()
-    model = model or os.environ.get("BRICKWRIGHT_GENERATION_MODEL") or DEFAULT_MODEL
-    kwargs = {"model": model, "max_cost": max_cost}
+    set_expert(use_expert)
+    build_model = build_model or os.environ.get("BRICKWRIGHT_GENERATION_MODEL") or DEFAULT_MODEL
+    if build_effort not in BUILD_EFFORTS:
+        raise ValueError(f"build_effort must be one of {', '.join(BUILD_EFFORTS)}, not {build_effort!r}")
+    kwargs = {
+        "model": build_model,
+        "effort": build_effort,
+        "max_cost": max_cost,
+        "request_timeout": BUILD_CALL_TIMEOUT,
+    }
     if records_dir is not None:
         kwargs["records_dir"] = Path(records_dir)
+    repair = repair and not use_plan
+    if repair:  # one review inside the run, then at most one repair (voxel.repair)
+        kwargs["max_critique_rounds"] = 1
     config = Config(**kwargs)
 
-    prompt = build_prompt(request, inventory)
-    record = Record.create(config, prompt=prompt)
-    cost, report, ok = 0.0, "", False
-    for round_no in range(1, max_retries + 2):
-        run_report = run(record, config)
-        cost += run_report.usage.cost_usd
-        ok, report = gate(record.build_path, inventory_path)
-        if ok or round_no > max_retries:
+    ledger = UsageLedger()
+    budget = Budget(max_cost, ledger)
+    budget_note = ""
+    stopped = ""  # set when an API call fails for good
+
+    def no_build(reason: str) -> DesignResult:
+        """An API call stopped the run before any build: nothing to keep."""
+        return DesignResult(
+            ok=False,
+            record_id="",
+            build_path=None,
+            rounds=0,
+            report="",
+            expand_cost_usd=ledger.step_cost("expand"),
+            plan_cost_usd=ledger.step_cost("plan"),
+            build_cost_usd=ledger.step_cost("build"),
+            review_cost_usd=ledger.step_cost("review"),
+            expert_cost_usd=ledger.step_cost("expert"),
+            usage=tuple(ledger.by_model()),
+            reused_from=reused_from,
+            max_cost=max_cost,
+            stopped=reason,
+            build_model=build_model,
+            build_effort=build_effort,
+        )
+
+    def out_of_budget(where: str) -> None:
+        nonlocal budget_note
+        budget_note = f"ran out before {where}"
+        warn(f"the budget (${max_cost:.2f}) {budget_note}; ${budget.spent:.3f} spent")
+
+    rescues = 0  # rescue-model (Opus) calls of ask_expert so far in this run
+
+    def round_config():
+        """This build round's config: BrickWright may spend what is left of the budget,
+        and ask_expert may make the run's rescue calls that are left."""
+        left = max(budget.remaining, 0.0)
+        return config.model_copy(
+            update={
+                "max_cost": left,
+                "subagent_max_cost": min(config.subagent_max_cost, left),
+                "expert_max_rescues": max(0, config.expert_max_rescues - rescues),
+            }
+        )
+    expansion: Expansion | None = None
+    expansion_data: dict | None = None
+    answers: list[Answer] = []
+    reused_from = ""
+
+    if from_record:
+        reused = load_record(config.records_dir, from_record, inventory)
+        if not request:
+            request = reused.request
+        elif request != reused.request:
+            warn(f"the request differs from {from_record}'s ({reused.request!r}); the build prompt will too")
+        if use_expand and reused.expansion is not None:
+            expansion = reused.expansion
+            expansion_data = {**reused.expansion_data, "from_record": from_record}
+        elif use_expand:
+            print(f"Note: {from_record} has no expansion.json; running without an expansion.")
+        plan = reused.plan
+        plans: list[dict] = [
+            plan_version(1, f"from record {from_record} (version {reused.plan_version})", plan, 0.0)
+        ]
+        reused_from = f"plan v{reused.plan_version}" + (" and expansion" if expansion else "") + f" from {from_record}"
+    else:
+        if use_expand:
+            budget.require("questions", "the questions")
+            try:
+                asked = asker(request, inventory, model=expand_model)
+            except ExpandError as err:
+                ledger.add(expand_model, "questions", err.usage)
+                raise ExpandError(str(err), ledger.total_cost, err.attempts) from None
+            except CallFailed as err:
+                ledger.add(expand_model, "questions", err.usage)
+                return no_build(err.reason)
+            ledger.add(expand_model, "questions", asked.usage)
+            answers = collect_answers(asked.questions, ask, interactive=ask_user)
+        if use_expand and not use_plan:  # no description: the builder gets the answers as one line
+            expansion_data = answers_record(request, answers, ledger.step_cost("expand"))
+        elif use_expand:
+            budget.require("expand", "the expansion")
+            try:
+                expanded = expander(request, answers, inventory, model=expand_model)
+            except ExpandError as err:
+                ledger.add(expand_model, "expand", err.usage)
+                raise ExpandError(str(err), ledger.total_cost, err.attempts) from None
+            except CallFailed as err:
+                ledger.add(expand_model, "expand", err.usage)
+                return no_build(err.reason)
+            ledger.add(expand_model, "expand", expanded.usage)
+            expansion = expanded.expansion
+            expansion_data = expansion_record(request, answers, expansion, ledger.step_cost("expand"))
+    if not use_plan:
+        plans = []
+        plan = fixed_checklist(request)  # what the review judges, the same for every build
+        asked_line = answers_line(answers)
+        prompt = direct_prompt(request, inventory, asked_line)
+    elif not from_record:
+        budget.require("plan", "the plan")
+        try:
+            planned: PlanResult = planner(request, inventory, model=plan_model, expansion=expansion)
+        except PlanError as err:
+            ledger.add(plan_model, "plan", err.usage)
+            raise PlanError(str(err), ledger.total_cost, err.attempts) from None
+        except CallFailed as err:
+            ledger.add(plan_model, "plan", err.usage)
+            return no_build(err.reason)
+        ledger.add(plan_model, "plan", planned.usage)
+        plan = planned.plan
+        plans = [plan_version(1, "initial", plan, planned.cost_usd)]
+    if use_plan:
+        if plan.sizing is not None:
+            print(plan.sizing.line)  # "Size: ..." (voxel.sizing); also saved in plan.json
+        prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan), expert=use_expert)
+    expansion_text = expansion.as_text() if expansion is not None else None
+    if not use_plan:  # the reviewer knows what was asked for, not a description
+        expansion_text = f"{request}\n{asked_line}" if asked_line else request
+
+    def new_record(record_prompt: str, from_id: str | None = None):
+        rec = Record.create(config, prompt=record_prompt, from_id=from_id)
+        if use_plan:
+            if plans[-1]["record_id"] is None:
+                plans[-1]["record_id"] = rec.id  # the first record built from this version
+            save_plan(rec, plan)
+            save_json(rec, PLANS_FILE, plans)
+        if expansion_data is not None:
+            save_json(rec, EXPANSION_FILE, expansion_data)
+        return rec
+
+    rounds = 0
+    repair_ctx = (
+        RepairContext(
+            checklist=plan,
+            asked=expansion_text or request,
+            model=review_model,
+            reviewer=reviewer,
+            gate=gate,
+            inventory_path=inventory_path,
+            review_estimate=budget.estimate("review"),
+            display=lambda rec, image: displayer(rec, image, config.render_timeout),
+        )
+        if repair
+        else None
+    )
+    repair_info: dict = {"ran": False, "enabled": repair}  # usage.json "repair"
+    repair_note = ""
+
+    def book_hook_reviews() -> Usage:
+        """The run's in-run reviews go on the review rows; returns their total."""
+        taken = repair_ctx.take_usage() if repair_ctx is not None else []
+        for usage in taken:
+            ledger.add(review_model, "review", usage)
+        return sum(taken, Usage())
+
+    def build_until_gate(record):
+        """(record, gate passed, report). A builder call that fails for good sets
+        `stopped` and returns that round's record as not passed (it is not gated)."""
+        nonlocal rounds, stopped, rescues, repair_note
+        for attempt in range(1, max_retries + 2):
+            cfg = round_config()
+            try:
+                with builder_retries(), (repair_active(repair_ctx) if repair_ctx else nullcontext()):
+                    run_report = run(record, cfg)
+            except CallFailed as err:
+                add_round_usage(ledger, build_model, record, interrupted_usage(record), book_hook_reviews())
+                rescues += expert_rescues(record)
+                rounds += 1
+                stopped = f"{err.reason}, in build round {rounds}"
+                return record, False, f"Not checked: {stopped}."
+            used, known = run_usage(run_report)
+            hook_reviews = book_hook_reviews()
+            add_round_usage(ledger, build_model, record, used, hook_reviews)
+            rescues += expert_rescues(record)
+            if not known:
+                warn(
+                    f"BrickWright could not price all of the builder's calls in {record.id}; "
+                    f"counting the known ${used.cost_usd:.3f}, so the cost is a lower bound"
+                )
+            rounds += 1
+            ok, report = gate(record.build_path, inventory_path)
+            asked = repair_ctx.repaired(record.id) if repair_ctx is not None else None
+            if asked is not None and not repair_info["ran"]:
+                finalized = bool(getattr(run_report, "done", True))
+                repair_info.update(
+                    ran=True,
+                    record_id=record.id,
+                    turns=max(0, int(getattr(run_report, "turns", 0) or 0) - asked.turns),
+                    cost_usd=max(
+                        0.0, used.cost_usd - (cfg.max_cost - asked.budget_left) - asked.result.cost_usd
+                    ),
+                    finalized=finalized,
+                    kept=True,
+                )
+                if not ok or not finalized:  # keep the build from before the repair
+                    restore(record)
+                    ok, report = gate(record.build_path, inventory_path)
+                    repair_info["kept"] = False
+                    repair_note = (
+                        "the repair " + ("failed the gate" if finalized else "did not finalize")
+                        + "; kept the build from before it"
+                    )
+                    warn(repair_note)
+            if ok or attempt > max_retries:
+                return record, ok, report
+            if not budget.allows("build"):
+                out_of_budget(f"gate retry {attempt}")
+                return record, ok, report
+            record = new_record(feedback_prompt(gate_problem(report), prompt), record.id)
+
+    reviews: list[dict] = []
+    logged_hook_reviews = 0  # in-run reviews already in `reviews`
+
+    def review_entry(number: int, record_id: str, image, result, stage: str | None) -> dict:
+        entry = {
+            "round": number,
+            "record_id": record_id,
+            "image": str(image),
+            "passed": review_passes(result.review, plan),
+            "cost_usd": result.cost_usd,
+            "verdicts": [v.model_dump() for v in result.review.verdicts],
+        }
+        if stage is not None:  # without a plan: the looser rule, and when it was judged
+            entry["stage"] = stage
+            entry["rule"] = pass_rule(plan)
+            entry["failed_items"] = [v.index for v in result.review.failed()]
+            entry["pose"] = pose_note(Path(config.records_dir) / record_id / "build.py")
+        return entry
+
+    review_passed: bool | None = None
+    failed_text = note = review_items = ""
+    kept = None  # (record, report) of the last build that passed the gate
+    budget.require("build", "the first build")
+    record = new_record(prompt)
+    for review_round in range(1, MAX_REVIEW_ROUNDS + 1):
+        record, ok, report = build_until_gate(record)
+        if stopped:
+            if kept is not None:
+                (record, report), ok = kept, True
             break
-        record = Record.create(config, prompt=feedback_prompt(report), from_id=record.id)
-    return DesignResult(ok, record.id, Path(record.build_path), round_no, cost, report)
+        if not ok:
+            if kept is not None:
+                note = f"the rebuild after the review failed the gate ({record.id}); kept {kept[0].id}"
+                warn(note)
+                (record, report), ok = kept, True
+            break
+        kept = (record, report)
+        reused = None  # an in-run review of exactly this build.py (voxel.repair)
+        if repair_ctx is not None:
+            for hooked in repair_ctx.reviews[logged_hook_reviews:]:
+                stage = "before repair" if hooked.repair else "in run"
+                reviews.append(review_entry(len(reviews) + 1, hooked.record_id, hooked.image, hooked.result, stage))
+            logged_hook_reviews = len(repair_ctx.reviews)
+            last = repair_ctx.last_review(record.id)
+            if last is not None and last.sha == build_sha(record.build_path):
+                reused = last
+        if reused is not None:
+            result = reused.result
+            image = reused.image
+        else:
+            if not budget.allows("review"):
+                out_of_budget(f"review round {review_round}")
+                note, review_passed = "budget ran out", None
+                break
+            image, why = renderer(record, config)
+            if image is None:
+                note, review_passed = why, None
+                warn(f"review skipped: {why}")
+                break
+            if not use_plan:  # judge the build turned by its FACE and UP (voxel.display)
+                image, shown_as_built = displayer(record, image, config.render_timeout)
+                if shown_as_built:
+                    warn(shown_as_built)
+            try:
+                result = reviewer(plan, expansion_text, image, model=review_model)
+            except ReviewError as err:
+                ledger.add(review_model, "review", err.usage)
+                note, review_passed = str(err), None
+                warn(f"review skipped: {err}")
+                break
+            except CallFailed as err:
+                ledger.add(review_model, "review", err.usage)
+                stopped = f"{err.reason}, in review round {review_round}"
+                note, review_passed = "the review call failed", None
+                break
+            ledger.add(review_model, "review", result.usage)
+            stage = None
+            if not use_plan:
+                stage = "after repair" if repair_info["ran"] and repair_info["kept"] else "after run"
+            reviews.append(review_entry(len(reviews) + 1 if not use_plan else review_round, record.id, image, result, stage))
+        review_passed = review_passes(result.review, plan)
+        failed_text = review_report(result.review)
+        if not use_plan:
+            total = len(result.review.verdicts)
+            review_items = f"{total - len(result.review.failed())} of {total}"
+        save_reviews(record, reviews)
+        if review_passed or review_round == MAX_REVIEW_ROUNDS or not use_plan:
+            break  # without a plan there is nothing to re-plan: keep the build
+        if not budget.allows("revise", "build"):  # no point in a plan that cannot be built
+            out_of_budget(f"plan revision {review_round}")
+            break
+        try:
+            revised = reviser(plan, result.review, image, expansion, inventory, model=plan_model)
+        except PlanError as err:
+            ledger.add(plan_model, "revise", err.usage)
+            note = f"plan revision failed, keeping {record.id}: {err}"
+            warn(note)
+            break
+        except CallFailed as err:
+            ledger.add(plan_model, "revise", err.usage)
+            stopped = f"{err.reason}, in plan revision {review_round}"
+            break
+        ledger.add(plan_model, "revise", revised.usage)
+        plan = revised.plan
+        if plan.sizing is not None:
+            print(plan.sizing.line)
+        plans.append(
+            plan_version(len(plans) + 1, f"revised after review round {review_round}", plan, revised.cost_usd)
+        )
+        prompt = build_prompt(request, inventory, plan, spare_set(inventory, plan), expert=use_expert)
+        if not budget.allows("build"):
+            out_of_budget(f"the rebuild with plan v{len(plans)}")
+            break
+        # A new plan starts from an empty build, not from the shape it replaces.
+        record = new_record(feedback_prompt(review_problem(result.review), prompt, new_plan=True))
+
+    if use_plan:
+        save_json(record, PLANS_FILE, plans)  # the full history, also when an earlier build was kept
+    usage = ledger.by_model()
+    save_json(
+        record,
+        USAGE_FILE,
+        {
+            "models": usage,
+            "total_cost_usd": ledger.total_cost,
+            "max_cost_usd": max_cost,
+            "budget_note": budget_note or None,
+            "stopped": stopped or None,
+            "reused_from": reused_from or None,
+            "build_model": build_model,
+            "build_effort": build_effort,
+            "plan": use_plan,
+            **({"repair": repair_info} if not use_plan else {}),
+        },
+    )
+
+    return DesignResult(
+        ok=ok,
+        record_id=record.id,
+        build_path=Path(record.build_path),
+        rounds=rounds,
+        report=report,
+        expand_cost_usd=ledger.step_cost("expand"),
+        plan_cost_usd=ledger.step_cost("plan"),
+        build_cost_usd=ledger.step_cost("build"),
+        review_cost_usd=ledger.step_cost("review"),
+        expert_cost_usd=ledger.step_cost("expert"),
+        review_passed=review_passed,
+        review_rounds=len(reviews),
+        review_report=failed_text if review_passed is not None else "",
+        review_rule=pass_rule(plan) if not use_plan and review_passed is not None else "",
+        review_items=review_items,
+        repair=repair_line_text(repair_info, reviews) if repair else "",
+        repair_note=repair_note,
+        review_note=note,
+        usage=tuple(usage),
+        reused_from=reused_from,
+        max_cost=max_cost,
+        budget_note=budget_note,
+        stopped=stopped,
+        build_model=build_model,
+        build_effort=build_effort,
+    )
+
+
+def repair_line_text(info: dict, reviews: list[dict]) -> str:
+    """The repair round in one line: whether it ran, its cost, and the items passed
+    in the review before it and after it."""
+
+    def items(entry: dict) -> str:
+        total = len(entry["verdicts"])
+        return f"{total - len(entry['failed_items'])} of {total}"
+
+    before = next((r for r in reviews if r.get("stage") == "before repair"), None)
+    after = next((r for r in reviews if r.get("stage") == "after repair"), None)
+    if not info.get("ran"):
+        return "Repair: not needed" if any(r.get("passed") for r in reviews) else "Repair: did not run"
+    line = f"Repair: 1 round, {info['turns']} turn(s), ${info['cost_usd']:.3f}"
+    if not info.get("kept"):
+        return f"{line}; undone, kept the build from before it"
+    if before is not None and after is not None:
+        line += f"; review {items(before)} -> {items(after)} items"
+    return line
+
+
+def builder_line(result: DesignResult) -> str:
+    return f"Builder: {result.build_model}, effort {result.build_effort}"
+
+
+def models_line(result: DesignResult) -> str:
+    rows = [
+        f"{u['model']} {u['input_tokens']:,} in / {u['output_tokens']:,} out ${u['cost_usd']:.3f}"
+        for u in result.usage
+    ]
+    return "Models: " + (" | ".join(rows) if rows else "none")
+
+
+def cost_line(result: DesignResult) -> str:
+    return (
+        f"Cost: ${result.cost_usd:.3f} (expand ${result.expand_cost_usd:.3f} + "
+        f"plan ${result.plan_cost_usd:.3f} + build ${result.build_cost_usd:.3f} + "
+        f"expert ${result.expert_cost_usd:.3f} + review ${result.review_cost_usd:.3f})"
+    )
+
+
+def budget_line(result: DesignResult) -> str:
+    line = f"Budget: ${result.cost_usd:.3f} of ${result.max_cost:.2f} used"
+    if result.budget_note:
+        line += f"; {result.budget_note}, kept {result.record_id}"
+    return line
+
+
+def review_line(result: DesignResult) -> str:
+    if result.review_passed is None:
+        return f"Review: skipped ({result.review_note})" if result.review_note else "Review: not run"
+    outcome = "passed" if result.review_passed else "FAILED"
+    line = f"Review: {outcome} after {result.review_rounds} round(s)"
+    if result.review_rule:
+        line += f" ({result.review_items} items; rule: {result.review_rule})"
+    return f"{line}:\n{result.review_report}" if result.review_report else line
+
+
+def stopped_line(result: DesignResult) -> str:
+    kept = f"kept {result.record_id}" if result.ok else "no build passed the gate"
+    return f"Stopped: {result.stopped}; {kept}."
+
+
+def exit_code(result: DesignResult) -> int:
+    """0: gate passed and review passed or skipped. 2: gate failed. 3: review failed.
+    4: the budget ran out before any build passed the gate. 5: an API call failed
+    for good (after its retries, or no credit), whatever was kept."""
+    if result.stopped:
+        return 5
+    if not result.ok:
+        return 4 if result.budget_note else 2
+    return 3 if result.review_passed is False else 0
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python -m voxel.design")
-    parser.add_argument("request", help='what to build, like "a small red tower"')
+    parser.add_argument(
+        "request",
+        nargs="?",
+        default="",
+        help='what to build, like "a small red tower" (optional with --from-record)',
+    )
     parser.add_argument("--inventory", default="inventory.json")
-    parser.add_argument("--model", default=None)
-    parser.add_argument("--max-cost", type=float, default=0.5, help="USD cap per round")
+    parser.add_argument(
+        "--build-model",
+        "--model",
+        dest="build_model",
+        default=None,
+        help=f"model for the builder agent (default {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--build-effort",
+        choices=BUILD_EFFORTS,
+        default=DEFAULT_BUILD_EFFORT,
+        help=f"reasoning effort of the builder agent only (default {DEFAULT_BUILD_EFFORT})",
+    )
+    parser.add_argument(
+        "--plan-model",
+        default=DEFAULT_PLAN_MODEL,
+        help=f"model for the planning call (default {DEFAULT_PLAN_MODEL})",
+    )
+    parser.add_argument(
+        "--max-cost",
+        type=float,
+        default=DEFAULT_MAX_COST,
+        help=f"USD cap for the whole run: expand, plan, every build round, review (default {DEFAULT_MAX_COST})",
+    )
     parser.add_argument("--max-retries", type=int, default=2)
+    parser.add_argument(
+        "--no-questions",
+        action="store_true",
+        help="do not ask questions; use the default answers",
+    )
+    parser.add_argument(
+        "--no-expand",
+        action="store_true",
+        help="skip the questions and the detailed description; plan from the short request",
+    )
+    parser.add_argument(
+        "--from-record",
+        metavar="RECORD_ID",
+        default=None,
+        help="reuse that record's expansion and latest plan; skip questions, expand and plan",
+    )
+    parser.add_argument(
+        "--no-plan",
+        action="store_true",
+        help="no plan, no description, no re-plan: the build model designs and builds alone from "
+        "the request, the question answers and the part list; reviewed against a fixed "
+        "checklist, judged on the render turned by build.py's FACE and UP",
+    )
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="with --no-plan: one repair round in the builder's conversation if the review fails",
+    )
+    parser.add_argument(
+        "--no-expert",
+        action="store_true",
+        help="do not offer the builder the ask_expert tool (Sonnet, then Opus, fixes failed checks)",
+    )
     args = parser.parse_args(argv)
+    if not args.request and not args.from_record:
+        parser.error("the request is required unless --from-record is given")
+    if args.no_plan and args.from_record:
+        parser.error("--no-plan cannot be combined with --from-record (it reuses a plan)")
+    if args.repair and not args.no_plan:
+        parser.error("--repair needs --no-plan (the pipeline re-plans instead)")
     if argv is None and os.name == "nt" and not sys.flags.utf8_mode:
         # BrickWright writes its transcript with the Windows default encoding,
         # which cannot hold some characters. Run again in UTF-8 mode.
@@ -204,19 +1411,65 @@ def main(argv=None) -> int:
     if not Path(args.inventory).exists():
         print(f"Error: {args.inventory} not found. Run python -m voxel.rebrickable first.", file=sys.stderr)
         return 1
-    result = design(
-        args.request,
-        args.inventory,
-        model=args.model,
-        max_cost=args.max_cost,
-        max_retries=args.max_retries,
-    )
-    print(f"\n{'PASSED' if result.ok else 'FAILED'} the inventory gate after {result.rounds} round(s).")
-    print(f"Cost: ${result.cost_usd:.3f}")
-    print(f"Build file: {result.build_path}")
-    if not result.ok:
+    try:
+        result = design(
+            args.request,
+            args.inventory,
+            build_model=args.build_model,
+            build_effort=args.build_effort,
+            plan_model=args.plan_model,
+            max_cost=args.max_cost,
+            max_retries=args.max_retries,
+            use_expand=not args.no_expand,
+            ask_user=not args.no_questions,
+            from_record=args.from_record,
+            use_expert=not args.no_expert,
+            use_plan=not args.no_plan,
+            repair=args.repair,
+        )
+    except RecordError as err:
+        print(f"Error: cannot reuse record {args.from_record}: {err}", file=sys.stderr)
+        return 1
+    except ExpandError as err:
+        print(f"Error: expanding the request failed. {err}", file=sys.stderr)
+        print("Run again with --no-expand to plan from the short request.", file=sys.stderr)
+        print(f"Cost so far: ${err.cost_usd:.3f}", file=sys.stderr)
+        return 1
+    except PlanError as err:
+        print(f"Error: planning failed. {err}", file=sys.stderr)
+        print(f"Cost so far: ${err.cost_usd:.3f}", file=sys.stderr)
+        return 1
+    except BudgetError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        print("Run again with a higher --max-cost.", file=sys.stderr)
+        return 4
+    print_summary(result)
+    return exit_code(result)
+
+
+def print_summary(result: DesignResult) -> None:
+    print()
+    if result.stopped:
+        print(stopped_line(result))
+    if result.record_id:
+        print(f"{'PASSED' if result.ok else 'FAILED'} the gate (inventory, parts held up) after {result.rounds} round(s).")
+    if result.ok:
+        print(review_line(result))
+        if result.review_passed is False and result.review_note:
+            print(f"Note: {result.review_note}")
+        if result.repair:
+            print(result.repair)
+    if result.reused_from:
+        print(f"Reused {result.reused_from}.")
+    if result.build_model:
+        print(builder_line(result))
+    print(cost_line(result))
+    print(models_line(result))
+    print(budget_line(result))
+    if result.build_path is not None:
+        print(f"Build file: {result.build_path}")
+    if not result.ok and result.report:
         print(result.report)
-    return 0 if result.ok else 2
 
 
 if __name__ == "__main__":

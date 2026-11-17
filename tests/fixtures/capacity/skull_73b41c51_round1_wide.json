@@ -1,0 +1,236 @@
+{
+  "source": "runs/20261109-005715-make-me-a-skull-73b41c51/plan.round1.json",
+  "note": "Built: 321 parts, every check passed, but gray ran out and visible cells fell back to white, tan and red; the review failed on it. Reading 'wide': each 2-stud wall is one color, made of parts up to 2 wide (the plan: 'build walls 2 studs thick from wide plates').",
+  "sections": [
+    {
+      "name": "base",
+      "plan_text": "10 x 11 x 0.333; hidden colors inside, gray where the edge shows",
+      "size": {
+        "width": 10,
+        "depth": 11,
+        "height": 0.333
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 38
+        },
+        {
+          "color": "ANY",
+          "cells": 72
+        }
+      ],
+      "empty": 0
+    },
+    {
+      "name": "lower jaw",
+      "plan_text": "8 x 8 x 1.667; 2-stud-thick U walls of wide plates; gray",
+      "size": {
+        "width": 8,
+        "depth": 8,
+        "height": 1.667
+      },
+      "position": {
+        "x": 1,
+        "y": 3,
+        "z": 0.333
+      },
+      "fill": "shell",
+      "wall": 2,
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 200
+        }
+      ],
+      "empty": 40
+    },
+    {
+      "name": "face wall",
+      "plan_text": "10 x 2 x 3; gray front wall (2 studs thick where possible); nose x 4..6, z 3.333..4.667; eye sockets x 1..4 and x 6..9, z 4.333..6; black 1 stud behind each opening",
+      "size": {
+        "width": 10,
+        "depth": 2,
+        "height": 3
+      },
+      "position": {
+        "x": 0,
+        "y": 9,
+        "z": 3.333
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 104
+        },
+        {
+          "color": "BLACK",
+          "cells": 38
+        }
+      ],
+      "empty": 38
+    },
+    {
+      "name": "teeth and mouth",
+      "plan_text": "8 gray 30069 headlight bricks; a BLACK 1x8 plate row set 1 stud back; gray 1x1 round plates (4073) as upper teeth",
+      "size": {
+        "width": 8,
+        "depth": 2,
+        "height": 1.333
+      },
+      "position": {
+        "x": 1,
+        "y": 9,
+        "z": 2
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 32
+        },
+        {
+          "color": "BLACK",
+          "cells": 8
+        }
+      ],
+      "empty": 24,
+      "parts": [
+        {
+          "part": "30069",
+          "color": "LIGHT_BLUISH_GRAY",
+          "count": 8
+        },
+        {
+          "part": "4073",
+          "color": "LIGHT_BLUISH_GRAY",
+          "count": 8
+        }
+      ]
+    },
+    {
+      "name": "side and back walls",
+      "plan_text": "10 x 9 ring, z 0.333..6.333; LIGHT_BLUISH_GRAY outside, hidden colors inside; closed walls at every height (beside the jaw only the back, y 0..3)",
+      "size": {
+        "width": 10,
+        "depth": 9,
+        "height": 6
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0.333
+      },
+      "fill": "shell",
+      "wall": 2,
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 744
+        }
+      ],
+      "empty": 336
+    },
+    {
+      "name": "cranium level 1",
+      "plan_text": "level 1 (z 6.667..7.667) full 10x11 ring 2 studs thick; level 2 (z 7.667..8.333) inset 1 stud (8x9); level 3 (z 8.333..8.667) inset again (6x7); LIGHT_BLUISH_GRAY",
+      "size": {
+        "width": 10,
+        "depth": 11,
+        "height": 1
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 6.667
+      },
+      "fill": "shell",
+      "wall": 2,
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 204
+        }
+      ],
+      "empty": 0
+    },
+    {
+      "name": "cranium level 2",
+      "plan_text": "level 1 (z 6.667..7.667) full 10x11 ring 2 studs thick; level 2 (z 7.667..8.333) inset 1 stud (8x9); level 3 (z 8.333..8.667) inset again (6x7); LIGHT_BLUISH_GRAY",
+      "size": {
+        "width": 8,
+        "depth": 9,
+        "height": 0.667
+      },
+      "position": {
+        "x": 1,
+        "y": 1,
+        "z": 7.667
+      },
+      "fill": "shell",
+      "wall": 2,
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 104
+        }
+      ],
+      "empty": 0
+    },
+    {
+      "name": "ceiling",
+      "plan_text": "10 x 11 x 0.333 full-footprint plate layer; hidden colors inside, gray at the visible edge; brow: front row sticks out to y 12",
+      "size": {
+        "width": 10,
+        "depth": 12,
+        "height": 0.333
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 6.333
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 40
+        },
+        {
+          "color": "ANY",
+          "cells": 80
+        }
+      ],
+      "empty": 0
+    },
+    {
+      "name": "cranium level 3",
+      "plan_text": "level 1 (z 6.667..7.667) full 10x11 ring 2 studs thick; level 2 (z 7.667..8.333) inset 1 stud (8x9); level 3 (z 8.333..8.667) inset again (6x7); LIGHT_BLUISH_GRAY",
+      "size": {
+        "width": 6,
+        "depth": 7,
+        "height": 0.333
+      },
+      "position": {
+        "x": 2,
+        "y": 2,
+        "z": 8.333
+      },
+      "fill": "solid",
+      "cells": [
+        {
+          "color": "LIGHT_BLUISH_GRAY",
+          "cells": 42
+        }
+      ],
+      "empty": 0
+    }
+  ]
+}
