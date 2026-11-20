@@ -1,0 +1,2028 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 582f372..e968522 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -45,7 +45,7 @@ You are the planner and the reviewer. You hand the part placing to the `lego-bui
+    - Stop after 8 builder calls in total, or when validate passes.
+    - Keep a log in runs/<record_id>/build_log.md: one line per builder or solver call, with which checks failed.6. **Review.** Run `scripts/bw external render <record_id>` and look at `records/<record_id>/out/build.png`. For each checklist item, decide pass or fail, with a one-line reason. Save this as `runs/<record_id>/review.json`.
+    - Any failed item: revise plan.json so the failed items can pass (change the design, not only details), and go back to step 5. The builder starts from an empty build.py. Max 2 review rounds.
+-7. **Finish.** Run `scripts/bw external finalize <record_id>`, then `.venv/bin/python -m voxel.sequence <record_id>`. This writes the manual as `records/<record_id>/out/build.stepped.ldr`.
++7. **Finish.** Run `scripts/bw external finalize <record_id>`, then `.venv/bin/python -m voxel.sequence <record_id>`. This writes the manual as `records/<record_id>/out/build.stepped.ldr` and the instructions page's data as `out/instructions.json`.
+ 8. **Report.** Tell me: the record_id, the part count, the number of manual pages, the review result per item, how many times the builder and the solver were called, and the session ID (from `/status`) so I can measure the cost.
+ 
+ ## graphify
+diff --git a/README.md b/README.md
+index 7be7cfe..183441d 100644
+--- a/README.md
++++ b/README.md
+@@ -119,7 +119,7 @@ full inventory.
+ The builder does not split the build into steps; Voxel does that in code once
+ the inventory check passes. It starts with the parts on the ground, then keeps
+ adding parts that are clipped to or rest on a part already placed (in the order
+-`build.py` wrote them), in pages of at most 12 parts. Parts on the same part
++`build.py` wrote them), in pages of at most 6 parts. Parts on the same part
+ below share a page when they fit. The result is `out/build.ldr` with a `0 STEP`
+ after each page; the builder's own order is kept as `out/build.unordered.ldr`.
+ The step check then runs on the computed order as a safety check. Parts that
+@@ -275,6 +275,32 @@ Flags:
+   the first passed), `usage.json` has `repair` (turns, cost, kept). Not with
+   `--from-record`. Use it with `--build-model claude-opus-5-5 --max-cost 2.5`.
+ 
++## Building instructions
++
++Every finished build gets LEGO-style instructions on the website. On the Build
++page, a finished build shows "Open building instructions"; the Guide gallery
++links them for past builds too. The page is `/records/<record_id>/instructions`:
++
++- a cover with the finished model, then one page per step, then the parts list;
++- each step shows its number and a parts box (a picture of each part, "2x");
++- the model as built so far, framed so it fills the page; the new parts drop in
++  and glow once, then stay outlined in yellow; a part that is mostly hidden, or a
++  lone small part, is lifted off its spot with a red arrow to it (at most two per
++  step); a step whose parts go on different sides is split, one step per side;
++  a part never shares a step with the part it attaches to (that one comes first);
++  you can drag to turn it and scroll to zoom;
++- the parts list says which of your sets each piece comes from (builds made on
++  the website keep their inventory, with sets, as `inventory.json` in the record);
++- arrow keys or the slider move between steps; "Save as PDF" renders every page
++  and opens the print dialog (choose "Save as PDF"): one step per sheet.
++
++The data comes from the stepped LDraw file only (`out/build.stepped.ldr`, or
++`out/build.ldr` when it has step markers): `build.py` is never run for it.
++`python -m voxel.sequence <record_id>` also writes it as `out/instructions.json`;
++for an older record run `python -m voxel.instructions <record_id>`. The part
++shapes come from your LDraw library (`LDRAW_LIBRARY_PATH`, `~/ldraw` or
++`C:/LDraw`), the same one the viewer uses.
++
+ ## Get an inventory from set numbers
+ 
+ Put your key in a `.env` file (it is ignored by git):
+@@ -311,5 +337,5 @@ name (like `RED`) or an LDraw color code. See `inventory.example.json`.
+ 2. Rebrickable fetch (done)
+ 3. Agent loop with Claude Haiku, with the check wired into validation (done)
+ 4. "Closest build you can make" mode and a missing parts report
+-5. Step-by-step handout (PDF)
++5. Step-by-step handout (done: the instructions page, with Save as PDF)
+ 6. Web app
+diff --git a/src/voxel/design.py b/src/voxel/design.py
+index bc52ca8..9093b98 100644
+--- a/src/voxel/design.py
++++ b/src/voxel/design.py
+@@ -39,7 +39,7 @@ Two layers keep the agent honest (both against the FULL inventory):
+    the report (up to max_retries times).
+ 
+ Build steps are computed in code, not by the builder: after the inventory
+-check, the gate orders the parts bottom-up into pages of at most 12
++check, the gate orders the parts bottom-up into pages of at most 6
+ (voxel.sequence), writes them as out/build.ldr (the builder's own order is kept
+ as out/build.unordered.ldr), and runs check_steps on that order as a safety
+ check. Parts nothing holds up go back to the builder as a normal retry.
+diff --git a/src/voxel/instructions.py b/src/voxel/instructions.py
+new file mode 100644
+index 0000000..ac8acef
+--- /dev/null
++++ b/src/voxel/instructions.py
+@@ -0,0 +1,310 @@
++"""Turn a stepped build into instructions.json for the instructions page.
++
++The input is the stepped LDraw file Voxel already writes (out/build.stepped.ldr,
++or out/build.ldr when it has step markers): part lines with a `0 STEP` after
++each page. Only that text is read; build.py is never run, so the website can
++make instructions for any finished record safely.
++
++What the page gets, like a LEGO booklet:
++- steps: the parts each step adds, and a callout (part, color, how many);
++- parts_list: every part and color with its count, for the back pages;
++- bricks: every part's LDraw file, color and placement, so the page can draw
++  the model as it stands after each step.
++
++Run it on an existing record:
++    python -m voxel.instructions <record_id> [--records-dir records]
++It writes out/instructions.json in the record.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import re
++import sys
++from collections import Counter
++from pathlib import Path
++
++import bricklayer as bl
++
++from .export import _compose, _mat, _name
++
++FORMAT_VERSION = 1
++INSTRUCTIONS_FILE = "instructions.json"
++STEPPED_SOURCES = ("build.stepped.ldr", "build.ldr")  # first one with step markers wins
++UNKNOWN_HEX = "#9BA19D"  # a neutral gray for color codes BrickLayer does not know
++
++
++class NoSteps(ValueError):
++    """The LDraw text has no parts."""
++
++
++def _color(code: int) -> dict:
++    for c in bl.Color:
++        if c.ldraw_id == code:
++            return {
++                "code": code,
++                "name": c.display_name,
++                "hex": "#" + str(c.rgb).lstrip("#").upper(),
++                "trans": "TRANS" in c.finish.name,
++            }
++    return {"code": code, "name": f"Color {code}", "hex": UNKNOWN_HEX, "trans": False}
++
++
++_SIZE = re.compile(r"(\d+)\s*x\s*(\d+)(?:\s*x\s*(\d+))?")
++_SHAPES = ("round", "corner", "curved", "inverted", "double", "wedge", "arch", "cone", "dish")
++
++
++def short_name(name: str) -> str:
++    """A label that fits under a part picture: "Tile 1 x 4 with Groove" -> "1x4 tile",
++    "Plate 1 x 1 Round with Bar" -> "1x1 round plate with bar", "Slope 45 2 x 2" -> "2x2 slope"."""
++    words = name.replace("~", "").replace("=", "").replace("_", " ").split()
++    if not words:
++        return name
++    kind = words[0].lower()
++    size = _SIZE.search(name)
++    if not size:
++        return " ".join(words[:3]).lower()[:28]
++    dims = "x".join(g for g in size.groups() if g)
++    lowered = name.lower()
++    shapes = [s for s in _SHAPES if re.search(rf"\b{s}\b", lowered)]
++    tail = " with bar" if re.search(r"\bwith bar\b", lowered) else ""
++    return " ".join([dims, *shapes, kind]) + tail
++
++
++def _part_id(file: str) -> str:
++    name = file.replace("\\", "/").rsplit("/", 1)[-1]
++    return name[:-4] if name.lower().endswith(".dat") else name
++
++
++def read_steps(text: str) -> list[list[dict]]:
++    """The parts of each step, in order: {"code", "file", "matrix"} per part.
++
++    `matrix` is LDraw's 12 numbers in line order (x y z a b c d e f g h i), in
++    world space. Steps are split at `0 STEP` (and `0 ROTSTEP`) lines of the main
++    model. Sub-files (`0 FILE ...`) are expanded into their parts; an empty step
++    is dropped.
++    """
++    blocks: dict[str, list[list[str]]] = {}
++    main: list[list[str]] = []
++    current: list[list[str]] | None = None
++    main_name: str | None = None
++    for raw in text.splitlines():
++        line = raw.split()
++        if len(line) >= 3 and line[0] == "0" and line[1] == "FILE":
++            name = raw.split(None, 2)[2].strip().lower()
++            current = blocks.setdefault(name, [])
++            main_name = main_name or name
++            continue
++        target = main if current is None or (main_name is not None and current is blocks.get(main_name)) else current
++        if line and line[0] == "1" and len(line) >= 15:
++            target.append(line)
++        elif len(line) >= 2 and line[0] == "0" and line[1] in ("STEP", "ROTSTEP"):
++            target.append(["STEP"])
++
++    identity = ([[1, 0, 0], [0, 1, 0], [0, 0, 1]], [0, 0, 0])
++
++    def leaves(lines, world, color, depth):
++        for t in lines:
++            if t == ["STEP"]:
++                continue
++            code = int(t[1]) if int(t[1]) != 16 else color
++            m = _compose(world, _mat(t[2:14]))
++            sub = t[14].lower()
++            if sub in blocks and depth < 20 and blocks[sub] is not main:
++                yield from leaves(blocks[sub], m, code, depth + 1)
++            else:
++                rot, trans = m
++                matrix = [round(v, 4) for v in trans + [v for row in rot for v in row]]
++                yield {"code": code, "file": t[14], "matrix": matrix}
++
++    steps: list[list[dict]] = [[]]
++    for t in main:
++        if t == ["STEP"]:
++            steps.append([])
++        else:
++            steps[-1].extend(leaves([t], identity, 16, 0))
++    steps = [s for s in steps if s]
++    if not steps:
++        raise NoSteps("the LDraw file has no parts")
++    return steps
++
++
++def _sources(entries: list[dict] | None) -> dict[tuple[str, int], list[tuple[str, int]]]:
++    """(part id, LDraw color code) -> [(set number, pieces)], from inventory entries with "sets"."""
++    out: dict[tuple[str, int], list[tuple[str, int]]] = {}
++    for entry in entries or []:
++        sets = entry.get("sets") if isinstance(entry, dict) else None
++        if not isinstance(sets, dict):
++            continue
++        raw = entry.get("color")
++        try:
++            code = raw if isinstance(raw, int) else bl.Color[str(raw).upper()].ldraw_id
++        except KeyError:
++            continue
++        key = (str(entry.get("part", "")).lower(), code)
++        out.setdefault(key, []).extend((str(s), int(n)) for s, n in sets.items() if int(n) > 0)
++    return out
++
++
++def build_instructions(text: str, title: str = "", inventory: list[dict] | None = None) -> dict:
++    """The JSON-ready instructions for one stepped LDraw text. With the record's inventory
++    (entries that say which sets their pieces come from), every parts list line also says
++    which sets to take its pieces from."""
++    steps = read_steps(text)
++    colors: list[dict] = []
++    parts: list[dict] = []
++    color_at: dict[int, int] = {}
++    part_at: dict[str, int] = {}
++    bricks: list[dict] = []
++    out_steps: list[dict] = []
++
++    for number, step in enumerate(steps, start=1):
++        ids: list[int] = []
++        callout: Counter[tuple[int, int]] = Counter()
++        for leaf in step:
++            code = leaf["code"]
++            if code not in color_at:
++                color_at[code] = len(colors)
++                colors.append(_color(code))
++            pid = _part_id(leaf["file"])
++            if pid.lower() not in part_at:
++                part_at[pid.lower()] = len(parts)
++                name = _name(pid)
++                parts.append({"id": pid, "name": name, "short": short_name(name), "file": leaf["file"]})
++            pi, ci = part_at[pid.lower()], color_at[code]
++            ids.append(len(bricks))
++            bricks.append({"part": pi, "color": ci, "step": number, "matrix": leaf["matrix"]})
++            callout[(pi, ci)] += 1
++        out_steps.append(
++            {
++                "number": number,
++                "bricks": ids,
++                # first-seen order, like the parts box in a LEGO step
++                "callout": [{"part": p, "color": c, "count": n} for (p, c), n in callout.items()],
++            }
++        )
++
++    totals: Counter[tuple[int, int]] = Counter((b["part"], b["color"]) for b in bricks)
++    parts_list = sorted(
++        ({"part": p, "color": c, "count": n} for (p, c), n in totals.items()),
++        key=lambda row: (colors[row["color"]]["name"], parts[row["part"]]["name"], parts[row["part"]]["id"]),
++    )
++    # where each piece comes from: take from the sets in order until the count is met
++    sources = _sources(inventory)
++    used: Counter[str] = Counter()
++    for row in parts_list:
++        offers = sources.get((parts[row["part"]]["id"].lower(), colors[row["color"]]["code"]), [])
++        need, take = row["count"], []
++        for set_num, have in offers:
++            n = min(need, have)
++            if n > 0:
++                take.append({"set": set_num, "count": n})
++                used[set_num] += n
++                need -= n
++            if not need:
++                break
++        if take:
++            row["sets"] = take
++    return {
++        "version": FORMAT_VERSION,
++        "sets": [{"set": s, "pieces": n} for s, n in used.most_common()],
++        "title": title,
++        "units": "LDraw units (1 stud = 20 LDU, -y is up)",
++        "pieces": len(bricks),
++        "colors": colors,
++        "parts": parts,
++        "bricks": bricks,
++        "steps": out_steps,
++        "parts_list": parts_list,
++    }
++
++
++def stepped_ldr(record: Path) -> Path | None:
++    """The record's stepped LDraw file, or None when it has none."""
++    for name in STEPPED_SOURCES:
++        path = record / "out" / name
++        if path.is_file():
++            if name == STEPPED_SOURCES[0]:
++                return path
++            text = path.read_text(encoding="utf-8", errors="replace")
++            if any(line.split()[:2] == ["0", "STEP"] for line in text.splitlines()):
++                return path
++    return None
++
++
++def record_title(record: Path) -> str:
++    """What the person asked for (the website's own rule), or ""."""
++    from .site import typed_request  # here, not at the top: site imports this module
++
++    try:
++        meta = json.loads((record / "meta.json").read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        meta = {}
++    return typed_request(record, meta if isinstance(meta, dict) else {})
++
++
++INVENTORY_FILE = "inventory.json"  # in the record (voxel.webjob copies it there)
++
++
++def record_inventory(record: Path) -> list[dict] | None:
++    try:
++        data = json.loads((record / INVENTORY_FILE).read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return None
++    return data if isinstance(data, list) else None
++
++
++def record_instructions(record: Path) -> dict | None:
++    """Instructions for a record, from its stepped LDraw file; None when it has none."""
++    source = stepped_ldr(record)
++    if source is None:
++        return None
++    text = source.read_text(encoding="utf-8", errors="replace")
++    return build_instructions(text, record_title(record), record_inventory(record))
++
++
++def write_instructions(record: Path) -> Path | None:
++    """Write out/instructions.json for a record. Returns the path, or None when
++    the record has no stepped LDraw file."""
++    data = record_instructions(record)
++    if data is None:
++        return None
++    out = record / "out" / INSTRUCTIONS_FILE
++    out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text(json.dumps(data, separators=(",", ":")) + "\n", encoding="utf-8")
++    return out
++
++
++def main(argv: list[str] | None = None) -> int:
++    """0: written. 1: no record, no stepped file, or the file has no parts."""
++    from brickwright.config import default_records_dir
++
++    parser = argparse.ArgumentParser(
++        prog="python -m voxel.instructions",
++        description="Write out/instructions.json for an existing record (no API call, build.py is not run).",
++    )
++    parser.add_argument("record_id")
++    parser.add_argument(
++        "--records-dir", type=Path, default=None, help="default: BRICKWRIGHT_RECORDS_DIR or records"
++    )
++    args = parser.parse_args(argv)
++    record = (args.records_dir or default_records_dir()) / args.record_id
++    try:
++        out = write_instructions(record)
++    except NoSteps as err:
++        print(f"Error: {err}", file=sys.stderr)
++        return 1
++    if out is None:
++        print(
++            f"Error: {record / 'out'} has no stepped build; run python -m voxel.sequence {args.record_id} first",
++            file=sys.stderr,
++        )
++        return 1
++    data = json.loads(out.read_text(encoding="utf-8"))
++    print(f"Wrote {out}: {data['pieces']} pieces in {len(data['steps'])} steps")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/voxel/rebrickable.py b/src/voxel/rebrickable.py
+index f2cff9c..ed10a50 100644
+--- a/src/voxel/rebrickable.py
++++ b/src/voxel/rebrickable.py
+@@ -18,7 +18,7 @@ import time
+ import urllib.error
+ import urllib.request
+ from collections import Counter
+-from dataclasses import dataclass, replace
++from dataclasses import dataclass, replace, field
+ from functools import lru_cache
+ from pathlib import Path
+ 
+@@ -216,6 +216,8 @@ class InventoryBuild:
+     unusable: list[Unusable]
+     sets: dict[str, tuple[int, int]]  # set number -> (copies, usable pieces per copy)
+     spare_pieces: int
++    # part -> {set number: pieces from that set}: where each piece comes from
++    sources: dict[PartKey, dict[str, int]] = field(default_factory=dict)
+ 
+ 
+ def build_inventory(set_inputs, key, *, cache_dir=CACHE_DIR, refresh=False, get_json=None, sleep=time.sleep):
+@@ -230,6 +232,7 @@ def build_inventory(set_inputs, key, *, cache_dir=CACHE_DIR, refresh=False, get_
+         copies[set_num] = copies.get(set_num, 0) + 1
+ 
+     totals: Counter[PartKey] = Counter()
++    sources: dict[PartKey, dict[str, int]] = {}
+     unusable: list[Unusable] = []
+     per_set: dict[str, tuple[int, int]] = {}
+     spare_pieces = 0
+@@ -240,20 +243,26 @@ def build_inventory(set_inputs, key, *, cache_dir=CACHE_DIR, refresh=False, get_
+         converted = convert_rows(rows, set_num)
+         for part_key, quantity in converted.counts.items():
+             totals[part_key] += quantity * count
++            by_set = sources.setdefault(part_key, {})
++            by_set[set_num] = by_set.get(set_num, 0) + quantity * count
+         unusable += [replace(u, quantity=u.quantity * count) for u in converted.unusable]
+         spare_pieces += converted.spare_pieces * count
+         per_set[set_num] = (count, sum(converted.counts.values()))
+         if not from_cache and n < len(copies) - 1:
+             sleep(1.1)  # Rebrickable allows about one request per second
+-    return InventoryBuild(Inventory(dict(totals)), unusable, per_set, spare_pieces)
+-
+-
+-def inventory_entries(inventory: Inventory) -> list[dict]:
+-    """The inventory as the JSON list that load_inventory reads."""
+-    return [
+-        {"part": part_id, "color": SUPPORTED_COLORS[code].name, "count": count}
+-        for (part_id, code), count in sorted(inventory.counts.items())
+-    ]
++    return InventoryBuild(Inventory(dict(totals)), unusable, per_set, spare_pieces, sources)
++
++
++def inventory_entries(inventory: Inventory, sources: dict | None = None) -> list[dict]:
++    """The inventory as the JSON list that load_inventory reads. With `sources`, each
++    entry also says which sets its pieces come from: "sets": {"10696-1": 3}."""
++    entries = []
++    for (part_id, code), count in sorted(inventory.counts.items()):
++        entry = {"part": part_id, "color": SUPPORTED_COLORS[code].name, "count": count}
++        if sources and sources.get((part_id, code)):
++            entry["sets"] = dict(sources[(part_id, code)])
++        entries.append(entry)
++    return entries
+ 
+ 
+ def write_outputs(result: InventoryBuild, out: str | Path, unusable_out: str | Path) -> None:
+diff --git a/src/voxel/sequence.py b/src/voxel/sequence.py
+index 576e9ed..78f4744 100644
+--- a/src/voxel/sequence.py
++++ b/src/voxel/sequence.py
+@@ -20,7 +20,8 @@ a step marker after each page; voxel.steps.check_steps is the safety check on it
+ 
+ Run it on an existing record, without any API call:
+     python -m voxel.sequence <record_id> [--records-dir records]
+-It writes out/build.stepped.ldr in the record (never out/build.ldr).
++It writes out/build.stepped.ldr in the record (never out/build.ldr), and
++out/instructions.json for the instructions page (voxel.instructions).
+ """
+ 
+ from __future__ import annotations
+@@ -90,14 +91,20 @@ def walk(build: bl.LegoBuild) -> tuple[list[list[tuple[int, int]]], list[int]]:
+ 
+ 
+ def paginate(passes: list[list[tuple[int, int]]], limit: int = MAX_STEP_PARTS) -> list[list[int]]:
+-    """Pages of at most `limit` parts; parts with the same anchor share a page when they fit."""
++    """Pages of at most `limit` parts; parts with the same anchor share a page when they fit.
++
++    A part never shares a page with the part it attaches to: like a LEGO booklet, the
++    part you build on comes one step before the parts that go on it."""
+     pages: list[list[int]] = []
+     current: list[int] = []
+     for this_pass in passes:
+         groups: dict[int, list[int]] = {}  # anchor -> parts, in order of first appearance
+         for part, anchor in this_pass:
+             groups.setdefault(anchor, []).append(part)
+-        for group in groups.values():
++        for anchor, group in groups.items():
++            if anchor in current:  # it attaches to a part of this page: start the next one
++                pages.append(current)
++                current = []
+             if len(current) + len(group) <= limit:
+                 current += group
+                 continue
+@@ -196,6 +203,14 @@ def main(argv: list[str] | None = None) -> int:
+     out.parent.mkdir(parents=True, exist_ok=True)
+     write_ldraw(stepped, out)
+     print(f"Wrote {out}")
++    try:  # the instructions page's data; a problem here never fails the manual
++        from .instructions import write_instructions
++
++        guide = write_instructions(record)
++        if guide is not None:
++            print(f"Wrote {guide}")
++    except Exception as err:
++        print(f"Warning: instructions.json not written: {type(err).__name__}: {err}", file=sys.stderr)
+     return 0 if not problems else 3
+ 
+ 
+diff --git a/src/voxel/serve.py b/src/voxel/serve.py
+index cbb41e9..1cf0b19 100644
+--- a/src/voxel/serve.py
++++ b/src/voxel/serve.py
+@@ -74,6 +74,48 @@ def collect_versions(path: str | Path) -> list[dict]:
+     return versions
+ 
+ 
++def model_text(query: str) -> str | None:
++    """A one-line LDraw file: one part in one colour (the page loads each part this
++    way). None when the query is not a valid ?file=&code=&hex=&edge=[&alpha=]."""
++    q = {k: v[0] for k, v in parse_qs(query).items()}
++    try:
++        code = int(q["code"])
++        hex_ = "#" + q["hex"].lstrip("#")[:6]
++        edge = "#" + q["edge"].lstrip("#")[:6]
++        part = Path(q["file"]).name
++        alpha = f" ALPHA {int(q['alpha'])}" if q.get("alpha") else ""
++    except (KeyError, ValueError):
++        return None
++    if not all(c in "0123456789abcdefABCDEF" for c in hex_[1:] + edge[1:]) or any(c in part for c in " \r\n"):
++        return None
++    return (
++        "0 Model\n0 !LDRAW_ORG Model\n"
++        f"0 !COLOUR c{code} CODE {code} VALUE {hex_} EDGE {edge}{alpha}\n"
++        f"1 {code} 0 0 0 1 0 0 0 1 0 0 0 1 {part}\n"
++    )
++
++
++def ldraw_response(route: str, query: str, ldraw: Path | None) -> tuple[int, bytes, str] | None:
++    """Answer /model and /parts/... /p/... (files from the LDraw library), or None
++    for any other route. The viewer and the instructions page both load parts this way."""
++    if route == "/model":
++        text = model_text(query)
++        if text is None:
++            return 400, b"bad request", "text/plain"
++        return 200, text.encode(), "text/plain; charset=utf-8"
++    for top in ("parts", "p"):
++        if route.startswith(f"/{top}/"):
++            if ldraw is None:
++                return 404, b"no LDraw library", "text/plain"
++            rel = route[1:].replace("\\", "/")
++            for name in (rel, rel.lower()):
++                target = (ldraw / name).resolve()
++                if ldraw.resolve() in target.parents and target.is_file():
++                    return 200, target.read_bytes(), "text/plain; charset=utf-8"
++            return 404, b"not found", "text/plain"
++    return None
++
++
+ def build_payload(versions: list[dict]) -> dict:
+     """Everything the page needs, in one JSON-ready dict."""
+     palette, part_list, color_at, part_at = [], [], {}, {}
+@@ -139,31 +181,9 @@ def make_handler(payload: bytes, ldraw: Path, sounds: Path):
+                 if sounds.is_dir() and sounds.resolve() in target.parents and target.is_file():
+                     return self._send(200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "audio/mpeg")
+                 return self._send(404, b"not found", "text/plain")
+-            if route == "/model":
+-                # A one-line LDraw file: one part in one colour. The page loads each part this way.
+-                q = {k: v[0] for k, v in parse_qs(query).items()}
+-                try:
+-                    code = int(q["code"])
+-                    hex_ = "#" + q["hex"].lstrip("#")[:6]
+-                    edge = "#" + q["edge"].lstrip("#")[:6]
+-                    part = Path(q["file"]).name
+-                except (KeyError, ValueError):
+-                    return self._send(400, b"bad request", "text/plain")
+-                alpha = f" ALPHA {int(q['alpha'])}" if q.get("alpha") else ""
+-                text = (
+-                    "0 Model\n0 !LDRAW_ORG Model\n"
+-                    f"0 !COLOUR c{code} CODE {code} VALUE {hex_} EDGE {edge}{alpha}\n"
+-                    f"1 {code} 0 0 0 1 0 0 0 1 0 0 0 1 {part}\n"
+-                )
+-                return self._send(200, text.encode(), "text/plain; charset=utf-8")
+-            for top in ("parts", "p"):
+-                if route.startswith(f"/{top}/"):
+-                    rel = route[1:].replace("\\", "/")
+-                    for name in (rel, rel.lower()):
+-                        target = (ldraw / name).resolve()
+-                        if ldraw.resolve() in target.parents and target.is_file():
+-                            return self._send(200, target.read_bytes(), "text/plain; charset=utf-8")
+-                    return self._send(404, b"not found", "text/plain")
++            found = ldraw_response(route, query, ldraw)
++            if found is not None:
++                return self._send(*found)
+             self._send(404, b"not found", "text/plain")
+ 
+     return Handler
+diff --git a/src/voxel/site.py b/src/voxel/site.py
+index 6d953ab..578b066 100644
+--- a/src/voxel/site.py
++++ b/src/voxel/site.py
+@@ -34,6 +34,7 @@ from pathlib import Path
+ from urllib.parse import parse_qs, unquote, urlsplit
+ 
+ from .design import REVIEW_FILE, USAGE_FILE, prompt_style
++from .instructions import NoSteps, record_instructions, stepped_ldr
+ from .relay import REDACTED, Relay, Secret
+ from .sequence import STEPPED_FILE
+ from .webjob import QUESTIONS_MARK, RESULT_MARK, SETTINGS_FILE
+@@ -311,6 +312,7 @@ def gallery_card(record: Path) -> dict | None:
+         "max_cost_usd": settings.get("max_cost_usd"),
+         "questions": settings.get("questions"),
+         "created": str(meta.get("created") or ""),
++        "instructions": f"/records/{record.name}/instructions" if stepped_ldr(record) is not None else None,
+     }
+ 
+ 
+@@ -473,7 +475,7 @@ class Site:
+             built = rb.build_inventory(sets, key, cache_dir=self.cache_dir)
+         except (rb.RebrickableError, ValueError) as err:
+             raise SiteError(str(err), 502) from None
+-        return rb.inventory_entries(built.inventory)
++        return rb.inventory_entries(built.inventory, getattr(built, "sources", None))
+ 
+     # --- Build ----------------------------------------------------------------
+ 
+@@ -639,6 +641,12 @@ class Site:
+                 pass
+         return b"".join(chunks)
+ 
++    def ldraw_dir(self) -> Path | None:
++        """The LDraw library the instructions page loads part shapes from."""
++        from .serve import find_ldraw
++
++        return find_ldraw(self.environ.get("LDRAW_LIBRARY_PATH"))
++
+     def _env_with_ldraw(self) -> dict[str, str]:
+         env = dict(self.environ)
+         if not env.get("LDRAW_LIBRARY_PATH"):
+@@ -698,6 +706,8 @@ class Site:
+             out["picture"] = f"/records/{record_id}/picture"
+         if (record / "out" / STEPPED_FILE).is_file():
+             out["manual"] = f"/records/{record_id}/manual.ldr"
++        if stepped_ldr(record) is not None:
++            out["instructions"] = f"/records/{record_id}/instructions"
+         review = review_summary(record)
+         # One plain line: the note's details (after its first sentence) stay on the server.
+         note = str(outcome.get("review_note") or "").split("\n")[0].split(". ")[0].strip().rstrip(".")
+@@ -784,6 +794,8 @@ def make_handler(site: Site, port: int):
+             self._guarded(self._post)
+ 
+         def _get(self):
++            from .serve import ldraw_response
++
+             route, _, query = self.path.partition("?")
+             route = unquote(route)
+             if route in PAGES:
+@@ -806,9 +818,26 @@ def make_handler(site: Site, port: int):
+                 return self._json(200, site.job_status(route[len("/api/build/"):]))
+             if route == "/api/gallery":
+                 return self._json(200, {"builds": gallery(site.records_dir)})
++            if route.startswith("/ldraw/"):  # part shapes for the instructions page
++                found = ldraw_response(route[len("/ldraw"):], query, site.ldraw_dir())
++                if found is not None:
++                    return self._send(*found)
++                raise SiteError("not found", 404)
+             if route.startswith("/records/"):
+                 record_id, _, what = route[len("/records/"):].partition("/")
+                 record = site.record_dir(record_id)
++                if what == "instructions":
++                    if stepped_ldr(record) is None:
++                        raise SiteError("this build has no instructions", 404)
++                    return self._send(200, (WEB / "instructions.html").read_bytes(), "text/html; charset=utf-8")
++                if what == "instructions.json":
++                    try:
++                        data = record_instructions(record)
++                    except NoSteps:
++                        data = None
++                    if data is None:
++                        raise SiteError("this build has no instructions", 404)
++                    return self._json(200, data)
+                 if what == "picture":
+                     picture = record_picture(record)
+                     if picture is not None:
+diff --git a/src/voxel/steps.py b/src/voxel/steps.py
+index 96db177..4b77d81 100644
+--- a/src/voxel/steps.py
++++ b/src/voxel/steps.py
+@@ -14,7 +14,7 @@ from __future__ import annotations
+ import bricklayer as bl
+ 
+ STEPS_CHECK_NAME = "buildable_steps"
+-MAX_STEP_PARTS = 12
++MAX_STEP_PARTS = 6  # like a LEGO booklet: a few parts per step
+ 
+ 
+ def describe_leaf(leaf: bl.Placement) -> str:
+diff --git a/src/voxel/web/instructions.html b/src/voxel/web/instructions.html
+new file mode 100644
+index 0000000..40843ed
+--- /dev/null
++++ b/src/voxel/web/instructions.html
+@@ -0,0 +1,893 @@
++<!doctype html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<meta name="referrer" content="no-referrer">
++<title>Voxel instructions</title>
++<link rel="stylesheet" href="/static/site.css">
++<style>
++/* Layout: one booklet page at a time. The 3D stage fills the page; the step number,
++   the parts box and (when the view turns) a turn badge sit on top of it at the top
++   left, like a LEGO step. Controls (back, a step slider, next) run along the bottom.
++   Page 0 is the cover, the last page is the parts list. Printing swaps all of this
++   for #print. */
++:root { --parts-bg: #d6e6f4; --new: #ffb800; }
++.book { padding: 20px 0 28px; display: grid; gap: 14px; }
++.book-head { display: flex; justify-content: space-between; align-items: end; gap: 16px; flex-wrap: wrap; }
++.book-head h1 { font-size: clamp(1.6rem, 4vw, 2.4rem); max-width: 24ch; }
++.book-head p { color: var(--soft); margin-top: 6px; }
++.tools { display: flex; gap: 8px; flex-wrap: wrap; }
++.btn {
++  font: 600 0.95rem/1 var(--body); color: var(--ink); background: var(--panel);
++  border: var(--edge); border-radius: var(--radius); padding: 10px 14px; cursor: pointer;
++}
++.btn:hover { background: var(--plate); }
++.btn.go { background: var(--yellow); }
++.btn.go:hover { background: #ffd62e; }
++.btn:disabled { opacity: 0.4; cursor: default; background: var(--panel); }
++
++.page { position: relative; height: min(70vh, 660px); min-height: 400px; overflow: hidden; background: #f4f7fa; }
++#stage { position: absolute; inset: 0; touch-action: none; cursor: grab; }
++#stage:active { cursor: grabbing; }
++#stage canvas { display: block; width: 100%; height: 100%; }
++
++.corner { position: absolute; top: 16px; left: 16px; right: 16px; display: flex; gap: 14px; align-items: flex-start; pointer-events: none; }
++.stepnum { font: 800 clamp(2.6rem, 7vw, 4.2rem)/0.9 var(--display); min-width: 1.2ch; }
++.callout {
++  background: var(--parts-bg);   /* light blue, like LEGO: white parts stay visible */
++  border: var(--edge); border-radius: var(--radius);
++  padding: 10px 12px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; max-width: min(620px, 70%);
++}
++.callout figure { margin: 0; display: grid; justify-items: center; gap: 1px; width: 92px; }
++.callout img { width: 92px; height: 92px; object-fit: contain; }
++.callout figcaption { display: grid; justify-items: center; line-height: 1.1; text-align: center; }
++.callout figcaption b { font: 800 1.15rem/1 var(--display); }
++.callout figcaption span { font-size: 0.78rem; color: var(--ink); opacity: 0.75; }
++.turn {
++  display: flex; align-items: center; gap: 6px; background: var(--panel); border: var(--edge);
++  border-radius: 999px; padding: 6px 12px 6px 8px; font-weight: 600; font-size: 0.9rem; white-space: nowrap;
++}
++.turn svg { width: 26px; height: 26px; }
++.newkey { position: absolute; right: 16px; bottom: 14px; display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--soft); pointer-events: none; }
++.newkey i { width: 22px; height: 14px; border: 3px solid var(--new); border-radius: 3px; display: inline-block; }
++.newkey .arrowkey { width: 22px; height: 4px; background: #d01012; position: relative; margin-left: 10px; display: inline-block; }
++.newkey .arrowkey::after { content: ""; position: absolute; right: -6px; top: -5px; border: 7px solid transparent; border-left: 8px solid #d01012; border-right: 0; }
++
++.cover { position: absolute; left: 16px; bottom: 16px; pointer-events: none; }
++.cover .btn { pointer-events: auto; }
++.cover p { font: 600 1rem/1.4 var(--body); color: var(--soft); margin-bottom: 10px; }
++
++.loading { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 20px; color: var(--soft); background: #f4f7fa; }
++
++.list { position: absolute; inset: 0; overflow: auto; padding: 20px; background: var(--panel); }
++.list h2 { margin-bottom: 4px; }
++.list > div > p { color: var(--soft); margin-bottom: 16px; }
++.list h3 { margin: 18px 0 8px; display: flex; align-items: center; gap: 8px; }
++.list h3 i { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--ink); display: inline-block; }
++.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; }
++.cell { background: var(--parts-bg); border: 2px solid var(--plate-dot); border-radius: var(--radius); padding: 8px; display: grid; justify-items: center; text-align: center; gap: 2px; }
++.cell img { width: 92px; height: 92px; object-fit: contain; }
++.cell b { font: 800 1.1rem/1 var(--display); }
++.cell span { font-size: 0.8rem; line-height: 1.25; }
++.cell small { font-size: 0.72rem; color: var(--soft); }
++.cell .from { font-style: normal; font-size: 0.72rem; font-weight: 600; color: var(--ink); background: var(--panel); border-radius: 999px; padding: 1px 7px; margin-top: 2px; }
++.sets { display: flex; flex-wrap: wrap; gap: 8px; margin: -6px 0 14px; }
++.setchip { border: 2px solid var(--ink); border-radius: 999px; padding: 4px 12px; font-size: 0.85rem; background: var(--panel); }
++
++.bar { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 12px; }
++.bar input[type="range"] { width: 100%; accent-color: var(--red); }
++.where { text-align: center; font-weight: 600; margin-top: 2px; }
++.hint { color: var(--soft); font-size: 0.85rem; text-align: center; }
++
++#print { display: none; }
++.overlay { position: fixed; inset: 0; background: rgba(22, 25, 30, 0.55); display: grid; place-items: center; z-index: 10; }
++.overlay div { background: var(--panel); border: var(--edge); border-radius: var(--radius); padding: 20px 26px; font-weight: 600; }
++
++@media (max-width: 640px) {
++  .page { height: 64vh; }
++  .callout figure { width: 60px; }
++  .callout img { width: 60px; height: 60px; }
++  .callout { max-width: 100%; }
++  .corner { flex-wrap: wrap; }
++  .newkey { display: none; }
++  .bar { grid-template-columns: 1fr 1fr; }
++  .bar .mid { grid-column: 1 / -1; order: -1; }
++}
++
++/* --- Printing: one booklet page per sheet --- */
++@page { size: landscape; margin: 12mm; }
++@media print {
++  html, body { background: #fff; }
++  .callout, .cell, .turn, .newkey i, .newkey .arrowkey { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
++  body > :not(#print) { display: none !important; }
++  #print { display: block; }
++  .ppage { break-after: page; position: relative; height: 180mm; display: flex; flex-direction: column; }
++  .ppage:last-child { break-after: auto; }
++  .ppage .pimg { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
++  .ppage .pimg img { max-width: 100%; max-height: 100%; object-fit: contain; }
++  .ppage .corner { position: absolute; top: 0; left: 0; right: 0; }
++  .ppage .callout { max-width: 70%; }
++  .pcover h1 { font-size: 2.4rem; max-width: none; }
++  .pcover p { color: var(--soft); margin-top: 6px; }
++  .ppage .list { position: static; padding: 0; }
++  .ppage.plist { height: auto; break-inside: auto; }
++  .cell { break-inside: avoid; }
++  .list h3 { break-after: avoid; }
++  .pfoot { position: absolute; right: 0; bottom: 0; font-weight: 600; color: var(--soft); }
++  .ppage .newkey { left: 0; right: auto; bottom: 0; }
++}
++</style>
++</head>
++<body>
++<header class="top">
++  <div class="wrap">
++    <a class="mark" href="/"><i aria-hidden="true"><b></b><b></b><b></b><b></b></i>Voxel</a>
++    <nav aria-label="Pages">
++      <a href="/">Build</a>
++      <a href="/guide">Guide</a>
++    </nav>
++  </div>
++</header>
++
++<main class="wrap book">
++  <div class="book-head">
++    <div>
++      <h1 id="title">Building instructions</h1>
++      <p id="summary">Loading</p>
++    </div>
++    <div class="tools">
++      <button class="btn" id="bReset" type="button">Reset view</button>
++      <button class="btn" id="bList" type="button">Parts list</button>
++      <button class="btn" id="bPrint" type="button" disabled>Save as PDF</button>
++    </div>
++  </div>
++
++  <section class="panel page" aria-label="Instruction page">
++    <div id="stage" aria-label="3D view of the model. Drag to turn it, scroll or pinch to zoom."></div>
++    <div class="corner" id="corner" hidden>
++      <div class="stepnum" id="stepnum"></div>
++      <div class="callout" id="callout" aria-label="Parts for this step"></div>
++      <div class="turn" id="turn" hidden></div>
++    </div>
++    <div class="newkey" id="newkey" hidden><i></i>New in this step<b class="arrowkey" aria-hidden="true"></b>Where it goes</div>
++    <div class="cover" id="cover" hidden>
++      <p id="coverFacts"></p>
++      <button class="btn go" id="bStart" type="button">Start building</button>
++    </div>
++    <div class="list" id="list" hidden></div>
++    <div class="loading" id="loading">Loading part shapes</div>
++  </section>
++
++  <div class="panel bar">
++    <button class="btn" id="bPrev" type="button" aria-label="Previous step">&larr; Back</button>
++    <div class="mid">
++      <input type="range" id="slider" min="0" max="1" value="0" aria-label="Go to step">
++      <div class="where" id="where" aria-live="polite"></div>
++    </div>
++    <button class="btn go" id="bNext" type="button" aria-label="Next step">Next &rarr;</button>
++  </div>
++  <p class="hint">Arrow keys change the step. Drag to turn the model, scroll to zoom.</p>
++</main>
++
++<div id="print" aria-hidden="true"></div>
++
++<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/LDrawLoader.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/GammaCorrectionShader.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/OutlinePass.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/environments/RoomEnvironment.js"></script>
++<script>
++(async () => {
++  const $ = (id) => document.getElementById(id);
++  const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
++  const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
++  const recordId = location.pathname.split("/")[2] || "";
++
++  let DATA;
++  try {
++    const res = await fetch("/records/" + encodeURIComponent(recordId) + "/instructions.json");
++    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "no instructions");
++    DATA = await res.json();
++  } catch (err) {
++    $("summary").textContent = "";
++    $("loading").textContent = "No instructions for this build: " + err.message + ".";
++    return;
++  }
++  if (!window.THREE || !THREE.LDrawLoader || !THREE.EffectComposer || !THREE.OutlinePass || !THREE.RoomEnvironment) {
++    $("loading").textContent = "The 3D library could not load. Check your internet connection and reload.";
++    return;
++  }
++
++  let STEPS = DATA.steps.length;
++  let LAST = STEPS + 1;                  // page 0 is the cover, LAST is the parts list
++  const title = DATA.title || "Your build";
++  document.title = title + " · Voxel instructions";
++  $("title").textContent = title;
++  $("summary").textContent = DATA.pieces + " pieces in " + STEPS + " steps";
++  $("coverFacts").textContent = DATA.pieces + " pieces · " + STEPS + " steps · " + DATA.parts_list.length + " kinds of part";
++  const label = (row) => DATA.colors[row.color].name + " " + DATA.parts[row.part].name;
++  const shortLabel = (row) => DATA.parts[row.part].short || DATA.parts[row.part].name;
++  const linear = (hex) => new THREE.Color(hex).convertSRGBToLinear();
++  const PAGE_BG = linear(0xf4f7fa), PRINT_BG = linear(0xffffff);
++
++  /* ---------- renderer, studio light, and the post passes ---------- */
++  const stage = $("stage");
++  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
++  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
++  renderer.outputEncoding = THREE.sRGBEncoding;
++  renderer.shadowMap.enabled = true;
++  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
++  renderer.setClearColor(PAGE_BG, 1);
++  stage.appendChild(renderer.domElement);
++  const scene = new THREE.Scene();
++  const camera = new THREE.PerspectiveCamera(26, 1, 0.1, 4000);
++
++  /* A soft studio (RoomEnvironment) gives the plastic its sheen; one key light casts the shadow. */
++  function studio(r, s) {
++    const pmrem = new THREE.PMREMGenerator(r);
++    s.environment = pmrem.fromScene(new THREE.RoomEnvironment(), 0.04).texture;
++    pmrem.dispose();
++    s.add(new THREE.HemisphereLight(0xffffff, 0xc8d0d8, 0.35));
++    const key = new THREE.DirectionalLight(0xffffff, 0.85);
++    key.position.set(-14, 30, -22);  // over the front-left shoulder, like the camera
++    s.add(key);
++    return key;
++  }
++  const key = studio(renderer, scene);
++  key.castShadow = true;
++  key.shadow.mapSize.set(2048, 2048);
++  key.shadow.bias = -0.0006;
++  const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.ShadowMaterial({ opacity: 0.14 }));
++  ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
++
++  /* Render, outline the new parts, then gamma. The targets ask for a stencil buffer because
++     three r128 then gives them a 24-bit depth buffer (16-bit otherwise, too coarse for LEGO
++     surfaces). With WebGL2 they are multisampled too, for smooth edges. */
++  const targetOptions = { format: THREE.RGBAFormat, stencilBuffer: true };
++  let target;
++  if (renderer.capabilities.isWebGL2 && THREE.WebGLMultisampleRenderTarget) {
++    target = new THREE.WebGLMultisampleRenderTarget(2, 2, targetOptions);
++    target.samples = 4;
++  } else {
++    target = new THREE.WebGLRenderTarget(2, 2, targetOptions);
++  }
++  const composer = new THREE.EffectComposer(renderer, target);
++  composer.addPass(new THREE.RenderPass(scene, camera));
++  const outline = new THREE.OutlinePass(new THREE.Vector2(2, 2), scene, camera);
++  outline.edgeStrength = 7; outline.edgeThickness = 1.6; outline.edgeGlow = 0.25; outline.pulsePeriod = 0;
++  outline.visibleEdgeColor.set(0xffb800); outline.hiddenEdgeColor.set(0xb07a00);
++  composer.addPass(outline);
++  composer.addPass(new THREE.ShaderPass(THREE.GammaCorrectionShader));
++
++  /* OutlinePass hides only meshes that are not selected when it draws its mask, so edge
++     lines would be outlined too: hide them while that pass runs (the scene is drawn before). */
++  const edgeLines = [];
++  const outlineRender = outline.render.bind(outline);
++  outline.render = (...args) => {
++    for (const l of edgeLines) l.visible = false;
++    outlineRender(...args);
++    for (const l of edgeLines) l.visible = true;
++  };
++
++  /* ---------- part shapes ---------- */
++  const loader = new THREE.LDrawLoader();
++  loader.setPath("/ldraw/");
++  loader.smoothNormals = true;
++  const templates = new Map();   // "part|color" -> loaded group
++  /* Edge lines like a LEGO booklet: darker than the part, but light gray on black and other dark parts. */
++  function edgeOf(hex) {
++    const c = new THREE.Color(hex);
++    const lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
++    return (lum < 0.2 ? c.lerp(new THREE.Color(0xb4bcc4), 0.7) : c.multiplyScalar(lum > 0.85 ? 0.45 : 0.5)).getHexString();
++  }
++  /* LDrawLoader keeps colors as written (sRGB); the passes work in linear light. Convert once per material. */
++  function toLinear(g) {
++    g.traverse((o) => {
++      for (const m of [].concat(o.material || [])) {
++        if (m.userData.linear) continue;
++        m.userData.linear = true;
++        if (m.color) m.color.convertSRGBToLinear();
++        if (m.uniforms && m.uniforms.diffuse) m.uniforms.diffuse.value.convertSRGBToLinear();
++        if (m.isMeshStandardMaterial) { m.roughness = Math.min(m.roughness, 0.35); m.envMapIntensity = 0.9; }
++      }
++    });
++  }
++  function loadTemplate(pi, ci) {
++    const k = pi + "|" + ci;
++    if (templates.has(k)) return Promise.resolve();
++    const color = DATA.colors[ci];
++    const q = new URLSearchParams({ file: DATA.parts[pi].file, code: 4000 + ci, hex: color.hex.replace("#", ""), edge: edgeOf(color.hex) });
++    if (color.trans) q.set("alpha", 150);
++    return new Promise((done) => {
++      loader.load("model?" + q, (g) => { toLinear(g); templates.set(k, g); done(); }, undefined, () => { console.warn("part failed", DATA.parts[pi].file); done(); });
++    });
++  }
++  /* A copy of a part with its own surface materials (so it can glow alone); edge lines are shared. */
++  function partCopy(pi, ci, tag) {
++    const tpl = templates.get(pi + "|" + ci);
++    if (!tpl) return null;
++    const g = tpl.clone(true), mats = [], meshes = [];
++    g.traverse((o) => {
++      if (o.isLineSegments && tag >= 0) edgeLines.push(o);
++      if (!o.isMesh) return;
++      o.material = Array.isArray(o.material) ? o.material.map((m) => m.clone()) : o.material.clone();
++      for (const m of [].concat(o.material)) if (m.emissive) mats.push(m);
++      o.castShadow = true; o.receiveShadow = true; o.userData.brick = tag; meshes.push(o);
++    });
++    return { g, mats, meshes };
++  }
++
++  const need = new Map();
++  for (const b of DATA.bricks) need.set(b.part + "|" + b.color, [b.part, b.color]);
++  let n = 0;
++  for (const [pi, ci] of need.values()) {   // one at a time, like the viewer: the loader shares state between loads
++    await loadTemplate(pi, ci);
++    n++; $("loading").textContent = "Loading part shapes " + n + " of " + need.size;
++  }
++  if (!templates.size) {
++    $("loading").textContent = "The part shapes could not load. The server needs your LDraw library (set LDRAW_LIBRARY_PATH).";
++    return;
++  }
++
++  /* ---------- the model: every part, shown up to the current step ---------- */
++  const model = new THREE.Group(); scene.add(model);
++  const flip = new THREE.Group(); flip.scale.set(0.05, -0.05, -0.05); model.add(flip);  // LDraw units -> studs, y up
++  const bricks = DATA.bricks.map((b, i) => {
++    const copy = partCopy(b.part, b.color, i);
++    if (!copy) return null;
++    const m = b.matrix;
++    const holder = new THREE.Group();
++    copy.g.matrixAutoUpdate = false;
++    copy.g.matrix.set(m[3], m[4], m[5], m[0], m[6], m[7], m[8], m[1], m[9], m[10], m[11], m[2], 0, 0, 0, 1);
++    holder.add(copy.g); flip.add(holder);
++    return { i, step: b.step, holder, mats: copy.mats, meshes: copy.meshes, box: null, float: new THREE.Vector3() };
++  });
++  model.updateMatrixWorld(true);
++  const box = new THREE.Box3().setFromObject(model);
++  const center = box.getCenter(new THREE.Vector3());
++  model.position.set(-center.x, -box.min.y, -center.z);
++  model.updateMatrixWorld(true);
++  const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 1);
++  key.shadow.camera.left = key.shadow.camera.bottom = -radius * 2.6;
++  key.shadow.camera.right = key.shadow.camera.top = radius * 2.6;
++  key.shadow.camera.far = radius * 12 + 60;
++  key.position.set(-radius * 1.2, radius * 3 + 10, -radius * 2);
++  key.shadow.camera.updateProjectionMatrix();
++
++  for (const b of bricks) if (b) b.box = new THREE.Box3().setFromObject(b.holder);
++
++  /* ---------- views: front-left first; the model turns when a step's new parts would be hidden ---------- */
++  const VIEWS = [
++    { name: "front left", az: Math.PI + 0.62, el: 0.5 },   // the front of the build is -z here
++    { name: "front right", az: Math.PI - 0.62, el: 0.5 },
++    { name: "back right", az: 0.62, el: 0.5 },
++    { name: "back left", az: -0.62, el: 0.5 },
++  ];
++  const HOME = VIEWS[0];
++
++  /* The distance at which every corner of `bx` fits in view, seen from az/el. `reserve` is the
++     share of the view's height kept free at the top for the step number and parts box: the
++     model is fitted into the rest and moved down into it. */
++  function fit(bx, az, el, aspect, margin, reserve = 0) {
++    const tanFull = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
++    const tanV = tanFull * margin * (1 - reserve), tanH = tanFull * margin * aspect;
++    const ce = Math.cos(el);
++    const back = new THREE.Vector3(Math.sin(az) * ce, Math.sin(el), Math.cos(az) * ce);   // target -> camera
++    const right = new THREE.Vector3(0, 1, 0).cross(back).normalize();
++    const up = back.clone().cross(right).normalize();
++    const c = bx.getCenter(new THREE.Vector3());
++    let d = 0;
++    for (let i = 0; i < 8; i++) {
++      const v = new THREE.Vector3(i & 1 ? bx.max.x : bx.min.x, i & 2 ? bx.max.y : bx.min.y, i & 4 ? bx.max.z : bx.min.z).sub(c);
++      const f = v.dot(back);
++      d = Math.max(d, f + Math.abs(v.dot(right)) / tanH, f + Math.abs(v.dot(up)) / tanV);
++    }
++    return { dist: d, target: c.clone().addScaledVector(up, tanFull * d * reserve), back };
++  }
++
++  /* How much of a step's new parts the camera sees from `view` (0 to 1.5). Rays go from the camera
++     to points on each new part; a point counts when no part built so far is in front of it. Parts
++     are tested as their boxes (shrunk a little so touching faces do not count): fast, and close
++     enough for LEGO shapes. */
++  const hitBoxes = new Map();   // brick -> its box shrunk a little
++  const shrunk = (b) => { if (!hitBoxes.has(b)) hitBoxes.set(b, b.box.clone().expandByScalar(-0.06)); return hitBoxes.get(b); };
++  const ray = new THREE.Ray();
++
++  /* ---------- one side per step ----------
++     Like a booklet, every step's new parts should show from one view. When they don't (some go on
++     the front, some on the back), the step is split in two or more: one step per side, each shown
++     from its side. The parts of one step never rest on each other, so any order is buildable. */
++  {
++    const groups = [];
++    for (let s = 1; s <= STEPS; s++) {
++      const fresh = bricks.filter((b) => b && b.step === s);
++      if (fresh.length < 2) { if (fresh.length) groups.push(fresh); continue; }
++      const built = bricks.filter((b) => b && b.step <= s);
++      const all = new THREE.Box3(); for (const b of built) all.union(b.box);
++      const eyes = VIEWS.map((v) => { const f = fit(all, v.az, v.el, 1.6, 0.86); return f.target.clone().addScaledVector(f.back, f.dist); });
++      const vis = new Map(fresh.map((b) => [b, eyes.map((e) => visibleShare(b.box, e, built, b))]));
++      let left = fresh.slice();
++      while (left.length) {   // the view that shows the most of what is left, then the next one
++        const counts = VIEWS.map((_, v) => left.filter((b) => vis.get(b)[v] >= 0.5).length);
++        const v = counts.indexOf(Math.max(...counts));
++        let take = left.filter((b) => vis.get(b)[v] >= 0.5);
++        if (!take.length) take = left;   // nothing shows well from any side: keep them together
++        groups.push(take);
++        left = left.filter((b) => !take.includes(b));
++      }
++    }
++    if (groups.length !== STEPS) {
++      DATA.steps = groups.map((g, k) => {
++        const callout = new Map();
++        for (const b of g) {
++          b.step = k + 1;
++          const row = DATA.bricks[b.i], key = row.part + "|" + row.color;
++          if (!callout.has(key)) callout.set(key, { part: row.part, color: row.color, count: 0 });
++          callout.get(key).count++;
++        }
++        return { number: k + 1, bricks: g.map((b) => b.i), callout: [...callout.values()] };
++      });
++      STEPS = DATA.steps.length; LAST = STEPS + 1;
++      $("summary").textContent = DATA.pieces + " pieces in " + STEPS + " steps";
++      $("coverFacts").textContent = DATA.pieces + " pieces · " + STEPS + " steps · " + DATA.parts_list.length + " kinds of part";
++    }
++  }
++
++  /* What is built after each step, as a box: the camera frames that, like a LEGO
++     booklet zooms in on a small model and out as it grows. */
++  const stepBox = [];
++  {
++    const acc = new THREE.Box3();
++    const minSide = Math.max(4, radius * 0.35);   // never zoom in closer than this many studs
++    for (let s = 1; s <= STEPS; s++) {
++      for (const b of bricks) if (b && b.step === s) acc.union(b.box);
++      const bx = acc.clone(), c = bx.getCenter(new THREE.Vector3()), sz = bx.getSize(new THREE.Vector3());
++      for (const axis of ["x", "y", "z"]) if (sz[axis] < minSide) { bx.min[axis] = c[axis] - minSide / 2; bx.max[axis] = c[axis] + minSide / 2; }
++      if (bx.min.y < 0) { bx.max.y -= bx.min.y; bx.min.y = 0; }
++      stepBox[s] = bx;
++    }
++  }
++  const boxFor = (p) => stepBox[p >= 1 && p <= STEPS ? p : STEPS];
++  function seen(step, view) {
++    const f = fit(boxFor(step), view.az, view.el, camera.aspect || 1.6, 0.86);
++    const eye = f.target.clone().addScaledVector(f.back, f.dist);
++    const built = bricks.filter((b) => b && b.step <= step);
++    const fresh = built.filter((b) => b.step === step);
++    if (!fresh.length) return 1;
++    let total = 0, any = 0;
++    const p = new THREE.Vector3(), dir = new THREE.Vector3(), at = new THREE.Vector3();
++    for (const b of fresh) {
++      const c = b.box.getCenter(new THREE.Vector3()), pts = [c];
++      for (let i = 0; i < 8; i++) {
++        p.set(i & 1 ? b.box.max.x : b.box.min.x, i & 2 ? b.box.max.y : b.box.min.y, i & 4 ? b.box.max.z : b.box.min.z);
++        pts.push(p.clone().lerp(c, 0.2));
++      }
++      let hit = 0;
++      for (const q of pts) {
++        dir.copy(q).sub(eye); const d = dir.length(); dir.divideScalar(d);
++        ray.set(eye, dir);
++        let blocked = false;
++        for (const o of built) {
++          if (o === b) continue;
++          const bx = shrunk(o);
++          if (bx.isEmpty() || !ray.intersectBox(bx, at)) continue;
++          if (at.distanceTo(eye) < d - 0.15 && !bx.containsPoint(q)) { blocked = true; break; }
++        }
++        if (!blocked) hit++;
++      }
++      total += hit / pts.length; if (hit) any++;
++    }
++    return total / fresh.length + 0.5 * (any / fresh.length);
++  }
++  const viewOf = [];   // the view chosen for each step
++  function chooseView(step, prev) {
++    const scores = VIEWS.map((v) => seen(step, v));
++    const best = Math.max(...scores);
++    if (scores[VIEWS.indexOf(prev)] >= best - 0.12) return prev;      // keep the view unless another is clearly better
++    return VIEWS[scores.findIndex((s) => s >= best - 0.02)];             // else the first good one, front views first
++  }
++  function viewFor(step) {
++    if (step < 1 || step > STEPS) return HOME;
++    if (!viewOf[step]) viewOf[step] = chooseView(step, step === 1 ? HOME : viewOf[step - 1] || current);
++    return viewOf[step];
++  }
++
++  /* ---------- arrows for parts that are hard to see ----------
++     New parts are shown in place. A part that is mostly hidden from this view, or a lone small
++     part, is lifted off its spot with a red arrow to it: straight up when nothing built so far is in the way, else
++     sideways across the screen. At most two per step. */
++  const backOf = (view) => new THREE.Vector3(Math.sin(view.az) * Math.cos(view.el), Math.sin(view.el), Math.cos(view.az) * Math.cos(view.el));
++  function eyeFor(step, view) {
++    const f = fit(boxFor(step), view.az, view.el, camera.aspect || 1.6, 0.86);
++    return f.target.clone().addScaledVector(f.back, f.dist);
++  }
++  /* The share (0 to 1) of points on box `bx` the eye sees past the parts in `blockers` (not `self`). */
++  function visibleShare(bx, eye, blockers, self) {
++    const c = bx.getCenter(new THREE.Vector3()), pts = [c], p = new THREE.Vector3(), dir = new THREE.Vector3(), at = new THREE.Vector3();
++    for (let i = 0; i < 8; i++) {
++      p.set(i & 1 ? bx.max.x : bx.min.x, i & 2 ? bx.max.y : bx.min.y, i & 4 ? bx.max.z : bx.min.z);
++      pts.push(p.clone().lerp(c, 0.2));
++    }
++    let hit = 0;
++    for (const q of pts) {
++      dir.copy(q).sub(eye); const d = dir.length(); dir.divideScalar(d);
++      ray.set(eye, dir);
++      let blocked = false;
++      for (const o of blockers) {
++        if (o === self) continue;
++        const ob = shrunk(o);
++        if (ob.isEmpty() || !ray.intersectBox(ob, at)) continue;
++        if (at.distanceTo(eye) < d - 0.15 && !ob.containsPoint(q)) { blocked = true; break; }
++      }
++      if (!blocked) hit++;
++    }
++    return hit / pts.length;
++  }
++  const AXES = [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]].map((v) => new THREE.Vector3(...v));
++  const axisOf = (d) => (d.x ? "x" : d.y ? "y" : "z");
++  const LIFT_GAP = 2.0;     // studs of air between a lifted part and its spot
++  const MAX_ARROWS = 2;     // more than this and a step is hard to read
++  const SMALL = 1.9;        // a part whose box diagonal is under this many studs (a 1x1) is easy to miss
++  function shrinkBox(bx, most) {   // smaller on every side, but never inside out
++    const out = bx.clone();
++    for (const a of ["x", "y", "z"]) { const s = Math.min(most, (bx.max[a] - bx.min[a]) * 0.3); out.min[a] += s; out.max[a] -= s; }
++    return out;
++  }
++  const layouts = [];
++  function layoutFor(step) {
++    if (layouts[step]) return layouts[step];
++    const out = { moves: new Map(), arrows: [], box: stepBox[step].clone() };
++    layouts[step] = out;
++    const before = bricks.filter((b) => b && b.step < step);
++    if (!before.length) return out;   // the first parts just go on the table
++    const fresh = bricks.filter((b) => b && b.step === step);
++    const built = bricks.filter((b) => b && b.step <= step);
++    const view = viewFor(step), back = backOf(view), eye = eyeFor(step, view);
++    const options = [AXES[0], ...AXES.slice(1).filter((d) => d.dot(back) > -0.2).sort((a, b) => Math.abs(a.dot(back)) - Math.abs(b.dot(back)))]
++      .filter((d) => Math.abs(d.dot(back)) < 0.8);   // never straight at the camera: the arrow would hide behind its part
++    // an arrow for a part that is mostly hidden in place, or small and the only one of its kind in
++    // the step (four identical 1x1s read fine in place); the most hidden first, at most two
++    const kinds = new Map();
++    for (const b of fresh) { const k = DATA.bricks[b.i].part + "|" + DATA.bricks[b.i].color; kinds.set(k, (kinds.get(k) || 0) + 1); }
++    const hard = [];
++    for (const b of fresh) {
++      const v = visibleShare(b.box, eye, built, b);
++      const small = b.box.getSize(new THREE.Vector3()).length() < SMALL && kinds.get(DATA.bricks[b.i].part + "|" + DATA.bricks[b.i].color) === 1;
++      if (v < 0.6 || small) hard.push([v, b]);
++    }
++    hard.sort((a, b) => a[0] - b[0]);
++    for (const [, b] of hard) {
++      if (out.moves.size >= MAX_ARROWS) break;
++      for (const d of options) {
++        const a = axisOf(d), s = d.x + d.y + d.z, L = b.box.max[a] - b.box.min[a] + LIFT_GAP;
++        const shift = d.clone().multiplyScalar(L), moved = b.box.clone().translate(shift);
++        if (before.some((o) => shrinkBox(b.box.clone().union(moved), 0.25).intersectsBox(o.box))) continue;
++        if (visibleShare(moved, eye, built, b) < 0.5) continue;
++        out.moves.set(b, shift);
++        out.box.union(moved);
++        const face = s > 0 ? b.box.min[a] : b.box.max[a];   // the side that lands
++        const c = b.box.getCenter(new THREE.Vector3());
++        const from = c.clone(), to = c.clone();
++        from[a] = face + s * (L - 0.15);   // just off the lifted part
++        to[a] = face + s * 0.06;           // on its spot
++        out.arrows.push({ from, to });
++        break;
++      }
++    }
++    return out;
++  }
++  const frameBox = (p) => (p >= 1 && p <= STEPS ? layoutFor(p).box : boxFor(p));
++
++  /* Red arrows: a round shaft and a cone, flat red like printed instructions. */
++  const arrowGroup = new THREE.Group(); scene.add(arrowGroup);
++  // drawn last and over everything, like an arrow printed on top of the picture: never hidden by a part
++  const ARROW_RED = new THREE.MeshBasicMaterial({ color: linear(0xd01012), depthTest: false, depthWrite: false });
++  arrowGroup.renderOrder = 999;
++  const ARROW_EDGE = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, depthWrite: false });
++  const UP = new THREE.Vector3(0, 1, 0);
++  function drawArrows(list, size) {
++    for (const o of arrowGroup.children) o.geometry.dispose();
++    arrowGroup.clear();
++    const r = 0.13 * Math.max(1, size / 22);
++    for (const { from, to } of list) {
++      const dir = to.clone().sub(from), length = dir.length(); dir.normalize();
++      const head = Math.min(r * 5, length * 0.45);
++      const shaftLen = Math.max(length - head, 0.01);
++      // the red arrow over a slightly bigger white one: a thin white border, so it reads on red parts too
++      for (const [mat, grow, order] of [[ARROW_EDGE, r * 0.55, 998], [ARROW_RED, 0, 999]]) {
++        const shaft = new THREE.Mesh(new THREE.CylinderGeometry(r + grow, r + grow, shaftLen, 12), mat);
++        shaft.position.copy(from).addScaledVector(dir, shaftLen / 2);
++        shaft.quaternion.setFromUnitVectors(UP, dir);
++        const cone = new THREE.Mesh(new THREE.ConeGeometry(r * 2.7 + grow * 1.6, head + grow * 2, 16), mat);
++        cone.position.copy(to).addScaledVector(dir, -head / 2);
++        cone.quaternion.setFromUnitVectors(UP, dir);
++        shaft.renderOrder = cone.renderOrder = order;
++        arrowGroup.add(shaft, cone);
++      }
++    }
++  }
++  /* A world-space shift as a position inside the flipped LDraw group. */
++  const toLocal = (v) => new THREE.Vector3(v.x / 0.05, -v.y / 0.05, -v.z / 0.05);
++
++  /* ---------- camera rig ---------- */
++  let current = HOME, zoom = 1;   // zoom: the person's own, kept across steps
++  const rig = { az: HOME.az, el: HOME.el, dist: 1, t: new THREE.Vector3() };
++  const goal = { az: HOME.az, el: HOME.el, dist: 1, t: new THREE.Vector3() };
++  const near = (az, from) => az + Math.round((from - az) / (2 * Math.PI)) * 2 * Math.PI;   // the short way round
++  /* How much of the stage's height the step number and parts box cover. */
++  function reserved() {
++    if (!(page >= 1 && page <= STEPS)) return 0;
++    const h = stage.clientHeight || 600, w = stage.clientWidth || 800, c = $("corner");
++    const share = Math.min(0.45, (c.offsetHeight + 24) / h);
++    // a box in the corner only overlaps the model's top-left: keep less room than when it spans the page
++    return c.firstElementChild && (c.querySelector(".callout").offsetWidth + 90) / w > 0.45 ? share : share * 0.45;
++  }
++  function frameGoal(instant) {
++    const f = fit(frameBox(page), current.az, current.el, camera.aspect, 0.9, reserved());
++    goal.t.copy(f.target); goal.dist = f.dist * zoom;
++    if (instant) { rig.t.copy(goal.t); rig.dist = goal.dist; rig.az = goal.az; rig.el = goal.el; }
++  }
++  function placeCamera(r) {
++    const ce = Math.cos(r.el);
++    camera.position.set(r.t.x + Math.sin(r.az) * ce * r.dist, r.t.y + Math.sin(r.el) * r.dist, r.t.z + Math.cos(r.az) * ce * r.dist);
++    camera.lookAt(r.t);
++    // near and far hug the model: depth precision goes where the parts are
++    const span = radius * 2.2 + 2;
++    camera.near = Math.max(0.5, r.dist - span); camera.far = r.dist + span * 2;
++    camera.updateProjectionMatrix();
++  }
++  function resize() {
++    const w = stage.clientWidth || 800, h = stage.clientHeight || 600;
++    renderer.setSize(w, h, false);
++    composer.setPixelRatio(renderer.getPixelRatio()); composer.setSize(w, h);
++    camera.aspect = w / h; camera.updateProjectionMatrix();
++    frameGoal(false);
++  }
++  const clampZoom = (z) => Math.min(3, Math.max(0.3, z));
++
++  const ptrs = new Map(); let pinch0 = 0;
++  stage.addEventListener("pointerdown", (e) => { stage.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; pinch0 = Math.hypot(a[0] - b[0], a[1] - b[1]); } });
++  stage.addEventListener("pointermove", (e) => {
++    const p = ptrs.get(e.pointerId); if (!p) return;
++    if (ptrs.size === 1) {
++      goal.az -= (e.clientX - p[0]) * 0.007;
++      goal.el = Math.min(1.45, Math.max(-0.2, goal.el + (e.clientY - p[1]) * 0.006));
++    } else if (ptrs.size === 2) {
++      ptrs.set(e.pointerId, [e.clientX, e.clientY]);
++      const [a, b] = [...ptrs.values()]; const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
++      if (pinch0) { zoom = clampZoom(zoom * (pinch0 / d)); frameGoal(false); } pinch0 = d;
++    }
++    ptrs.set(e.pointerId, [e.clientX, e.clientY]);
++  });
++  const endPtr = (e) => { ptrs.delete(e.pointerId); pinch0 = 0; };
++  stage.addEventListener("pointerup", endPtr); stage.addEventListener("pointercancel", endPtr);
++  stage.addEventListener("wheel", (e) => { e.preventDefault(); zoom = clampZoom(zoom * Math.exp(e.deltaY * 0.0011)); frameGoal(false); }, { passive: false });
++  function resetView() { goal.az = near(current.az, rig.az); goal.el = current.el; zoom = 1; frameGoal(false); }
++
++  /* ---------- part pictures: one angle, one scale ----------
++     Every picture uses the same orthographic camera and the same studs-per-pixel, so a 1x1 plate
++     looks small next to a 2x4 brick. Only parts too big for the square are shrunk to fit. */
++  const thumbs = new Map();   // "part|color" -> data URL
++  {
++    const T = 184, FIT = 2.1;  // FIT: half the square's width in studs (a 2x4 brick fits with room)
++    const tr = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
++    tr.setSize(T, T, false); tr.outputEncoding = THREE.sRGBEncoding; tr.setClearColor(0x000000, 0);
++    const ts = new THREE.Scene(); studio(tr, ts);
++    const tc = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 2000);
++    const dir = new THREE.Vector3(Math.sin(HOME.az) * Math.cos(0.55), Math.sin(0.55), Math.cos(HOME.az) * Math.cos(0.55));
++    for (const [k, [pi, ci]] of need) {
++      const copy = partCopy(pi, ci, -1); if (!copy) continue;
++      const f = new THREE.Group(); f.scale.set(0.05, -0.05, -0.05); f.add(copy.g); ts.add(f);
++      f.updateMatrixWorld(true);
++      const bb = new THREE.Box3().setFromObject(f), c = bb.getCenter(new THREE.Vector3());
++      const half = Math.max(FIT, bb.getSize(new THREE.Vector3()).length() * 0.53);
++      Object.assign(tc, { left: -half, right: half, top: half, bottom: -half });
++      tc.updateProjectionMatrix();
++      tc.position.copy(c).addScaledVector(dir, 200); tc.lookAt(c);
++      tr.render(ts, tc);
++      thumbs.set(k, tr.domElement.toDataURL("image/png"));
++      ts.remove(f); copy.mats.forEach((m) => m.dispose());
++    }
++    tr.dispose();
++  }
++  const thumb = (row) => {
++    const img = el("img"); img.src = thumbs.get(row.part + "|" + row.color) || ""; img.alt = label(row); img.title = label(row);
++    return img;
++  };
++  function calloutFor(step) {
++    return DATA.steps[step - 1].callout.map((row) => {
++      const f = el("figure"), cap = el("figcaption");
++      cap.append(el("b", "", row.count + "x"), el("span", "", shortLabel(row)));
++      f.title = label(row); f.append(thumb(row), cap); return f;
++    });
++  }
++  const TURN_SVG = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 19a10 6 0 1 0 6-8" fill="none" stroke="#16191e" stroke-width="2.6" stroke-linecap="round"/><path d="M14 6l-1.6 5.4 5.4 1" fill="none" stroke="#16191e" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
++  function turnBadge(into, view) { into.innerHTML = TURN_SVG; into.append(document.createTextNode("Turn the model: " + view.name)); }
++
++  /* ---------- pages ---------- */
++  let page = 0, glows = [], started = false, turned = false;
++  const GLOW = new THREE.Color(0xfff1b3);
++  function show(next, animate) {
++    next = Math.max(0, Math.min(LAST, next));
++    const forward = next === page + 1;
++    page = next;
++    const isStep = page >= 1 && page <= STEPS;
++    const shownStep = isStep ? page : STEPS;
++    for (const b of bricks) if (b) { b.holder.visible = b.step <= shownStep; b.float.set(0, 0, 0); b.holder.position.set(0, 0, 0); for (const m of b.mats) m.emissiveIntensity = 0; }
++    glows = [];
++    const fresh = isStep ? bricks.filter((b) => b && b.step === page) : [];
++    if (isStep) {   // hard-to-see parts are lifted off their spot, with an arrow to it
++      const lay = layoutFor(page);
++      for (const b of fresh) { const m = lay.moves.get(b); if (m) { b.float.copy(toLocal(m)); b.holder.position.copy(b.float); } }
++      drawArrows(lay.arrows, lay.box.getSize(new THREE.Vector3()).length());
++    } else {
++      drawArrows([], 1);
++    }
++    outline.selectedObjects = fresh.map((b) => b.holder);
++    if (animate && forward && isStep && !REDUCED) {
++      for (const b of fresh) { for (const m of b.mats) m.emissive.copy(GLOW); glows.push({ b, t: 0 }); }
++    }
++    const view = viewFor(page);
++    turned = isStep && page > 1 && viewFor(page - 1) !== view;
++    current = view; goal.az = near(view.az, rig.az); goal.el = view.el;
++
++    $("loading").hidden = true;
++    $("cover").hidden = page !== 0;
++    $("list").hidden = page !== LAST;
++    $("corner").hidden = !isStep;
++    $("newkey").hidden = !isStep;
++    if (isStep) {
++      $("stepnum").textContent = page;
++      $("callout").replaceChildren(...calloutFor(page));
++      $("turn").hidden = !turned;
++      if (turned) turnBadge($("turn"), view);
++    }
++    $("where").textContent = page === 0 ? "Cover" : page === LAST ? "Parts list" : "Step " + page + " of " + STEPS;
++    $("slider").value = page;
++    $("bPrev").disabled = page === 0;
++    $("bNext").disabled = page === LAST;
++    $("bNext").innerHTML = page === 0 ? "Start &rarr;" : page === STEPS ? "Parts list &rarr;" : "Next &rarr;";
++    history.replaceState(null, "", page ? "#step-" + page : location.pathname);
++    frameGoal(!started); started = true;   // after the parts box is filled: its height is kept free
++  }
++
++  function partsList(into) {
++    const wrapper = el("div");
++    wrapper.append(el("h2", "", "Parts list"), el("p", "", DATA.pieces + " pieces, all from your own sets. Pictures are to scale."));
++    if (DATA.sets && DATA.sets.length) {   // which of your sets to open, and how many pieces come from each
++      const sets = el("div", "sets");
++      for (const s of DATA.sets) {
++        const chip = el("span", "setchip"); chip.append(el("b", "", "Set " + s.set), document.createTextNode(" " + s.pieces + " pieces"));
++        sets.append(chip);
++      }
++      wrapper.append(sets);
++    }
++    const byColor = new Map();
++    for (const row of DATA.parts_list) { if (!byColor.has(row.color)) byColor.set(row.color, []); byColor.get(row.color).push(row); }
++    for (const [ci, rows] of byColor) {
++      const h = el("h3"); const dot = el("i"); dot.style.background = DATA.colors[ci].hex;
++      h.append(dot, document.createTextNode(DATA.colors[ci].name + " (" + rows.reduce((s, r) => s + r.count, 0) + ")"));
++      const grid = el("div", "grid");
++      for (const row of rows) {
++        const c = el("div", "cell"); c.title = label(row);
++        c.append(thumb(row), el("b", "", row.count + "x"), el("span", "", shortLabel(row)), el("small", "", DATA.parts[row.part].id));
++        if (row.sets && row.sets.length) {
++          const from = row.sets.map((s) => (row.sets.length > 1 ? s.count + " from " : "from ") + s.set).join(", ");
++          c.append(el("em", "from", from));
++        }
++        grid.append(c);
++      }
++      wrapper.append(h, grid);
++    }
++    into.replaceChildren(wrapper);
++  }
++  partsList($("list"));
++
++  /* ---------- controls ---------- */
++  const slider = $("slider"); slider.max = LAST;
++  slider.addEventListener("input", () => show(+slider.value, false));
++  $("bPrev").onclick = () => show(page - 1, true);
++  $("bNext").onclick = () => show(page + 1, true);
++  $("bStart").onclick = () => show(1, true);
++  $("bList").onclick = () => show(LAST, false);
++  $("bReset").onclick = resetView;
++  addEventListener("keydown", (e) => {
++    if (e.target.closest && e.target.closest("input, textarea, select")) return;
++    if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); show(page + 1, true); }
++    else if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); show(page - 1, true); }
++    else if (e.key === "Home") show(0, false);
++    else if (e.key === "End") show(LAST, false);
++  });
++
++  /* ---------- frame loop: easing camera, new parts drop in and glow once (the outline stays) ---------- */
++  let last = performance.now(), paused = false;
++  function frame(now) {
++    const dt = Math.min((now - last) / 1000, 0.05); last = now;
++    if (!paused) {
++      const k = 1 - Math.pow(0.002, dt);
++      rig.az += (goal.az - rig.az) * k; rig.el += (goal.el - rig.el) * k; rig.dist += (goal.dist - rig.dist) * k;
++      rig.t.lerp(goal.t, k);
++      for (let i = glows.length - 1; i >= 0; i--) {
++        const g = glows[i]; g.t += dt / 1.1;
++        const drop = Math.max(0, 1 - g.t / 0.35);                 // first third: settle down onto the model
++        g.b.holder.position.copy(g.b.float);
++        g.b.holder.position.y -= (drop * drop) * 24;               // LDraw units inside the flip: -y is up, 24 = one brick
++        const pulse = Math.sin(Math.PI * Math.min(1, g.t * 1.15));  // up, then back to normal
++        for (const m of g.b.mats) m.emissiveIntensity = 0.5 * pulse * pulse;
++        if (g.t >= 1) { g.b.holder.position.copy(g.b.float); for (const m of g.b.mats) m.emissiveIntensity = 0; glows.splice(i, 1); }
++      }
++      placeCamera(rig);
++      composer.render();
++    }
++    requestAnimationFrame(frame);
++  }
++
++  /* ---------- Save as PDF: render every page, then the browser's print dialog ---------- */
++  let printing = false;
++  async function printBook() {
++    if (printing) return;   // one run at a time, even on a double click
++    printing = true;
++    try { await makeBook(); } finally { printing = false; }
++  }
++  async function makeBook() {
++    const over = el("div", "overlay"); const msg = el("div", "", "Preparing pages"); over.append(msg); document.body.append(over);
++    await new Promise((r) => setTimeout(r, 30));
++    paused = true;
++    const keep = { page, ratio: renderer.getPixelRatio() };
++    const W = 1800, H = 1200;
++    renderer.setPixelRatio(1); renderer.setSize(W, H, false);
++    composer.setPixelRatio(1); composer.setSize(W, H);
++    renderer.setClearColor(PRINT_BG, 1);
++    camera.aspect = W / H; camera.updateProjectionMatrix();
++    const capture = (p) => {
++      show(p, false);
++      const f = fit(frameBox(p), current.az, current.el, W / H, 0.9, p >= 1 && p <= STEPS ? 0.2 : 0);
++      placeCamera({ az: current.az, el: current.el, dist: f.dist, t: f.target });
++      composer.render();
++      return renderer.domElement.toDataURL("image/jpeg", 0.92);
++    };
++    const out = $("print"); out.replaceChildren();
++
++    const cover = el("section", "ppage pcover");
++    const head = el("div"); head.append(el("h1", "", title), el("p", "", DATA.pieces + " pieces · " + STEPS + " steps"));
++    const ci = el("div", "pimg"); const cimg = el("img"); cimg.src = capture(0); ci.append(cimg);
++    cover.append(head, ci); out.append(cover);
++    for (let s = 1; s <= STEPS; s++) {
++      msg.textContent = "Preparing page " + s + " of " + STEPS;
++      if (s % 3 === 0) await new Promise((r) => setTimeout(r, 0));
++      const sec = el("section", "ppage");
++      const pi = el("div", "pimg"); const img = el("img"); img.src = capture(s); pi.append(img);
++      const corner = el("div", "corner"); const call = el("div", "callout");
++      call.append(...calloutFor(s));
++      corner.append(el("div", "stepnum", String(s)), call);
++      if (turned) { const t = el("div", "turn"); turnBadge(t, current); corner.append(t); }
++      const keyNote = el("div", "newkey"); keyNote.append(el("i"), document.createTextNode("New in this step"), el("b", "arrowkey"), document.createTextNode("Where it goes"));
++      sec.append(pi, corner, keyNote, el("div", "pfoot", s + " / " + STEPS));
++      out.append(sec);
++    }
++    const listPage = el("section", "ppage plist"); const lw = el("div", "list"); partsList(lw); listPage.append(lw); out.append(listPage);
++
++    renderer.setClearColor(PAGE_BG, 1);
++    renderer.setPixelRatio(keep.ratio); resize();
++    show(keep.page, false); frameGoal(true); paused = false;
++    await Promise.all([...out.querySelectorAll("img")].map((i) => i.decode().catch(() => {})));
++    over.remove();
++    print();
++  }
++  $("bPrint").onclick = printBook;
++  $("bPrint").disabled = false;
++
++  new ResizeObserver(resize).observe(stage); resize();
++  const fromHash = /^#step-(\d+)$/.exec(location.hash);
++  show(fromHash ? +fromHash[1] : 0, false);
++  requestAnimationFrame(frame);
++  window.__instructions = { show, printBook, pages: LAST + 1, viewOf, layoutFor };
++})();
++</script>
++</body>
++</html>
+diff --git a/src/voxel/web/site.js b/src/voxel/web/site.js
+index 1c04ae5..d39db00 100644
+--- a/src/voxel/web/site.js
++++ b/src/voxel/web/site.js
+@@ -305,11 +305,17 @@ function buildPage() {
+       right.append(el("p", "verdict", "Not reviewed"), el("p", "note", review.skipped || ""));
+     }
+ 
++    if (r.instructions) {
++      const open = el("a", "download", "Open building instructions");
++      open.href = r.instructions; open.target = "_blank"; open.rel = "noopener";
++      right.append(open);
++    }
+     if (r.manual) {
+-      const link = el("a", "download", "Download manual (.ldr)");
++      const link = el("a", r.instructions ? "" : "download", "Download manual (.ldr)");
+       link.href = r.manual; link.setAttribute("download", "");
+-      right.append(link);
+-    } else {
++      if (r.instructions) { const line = el("p", "note"); line.append(link); right.append(line); }
++      else right.append(link);
++    } else if (!r.instructions) {
+       right.append(el("p", "note", "No manual could be written for this build."));
+     }
+ 
+@@ -432,6 +438,11 @@ function guidePage() {
+     fact("Turns", b.turns ? String(b.turns) : "not recorded");
+     fact("Review", b.review ? b.review.passed_count + " of " + b.review.total + (b.review.passed ? ", passed" : ", failed") : "not reviewed");
+     inner.append(facts);
++    if (b.instructions) {
++      const open = el("a", "", "Building instructions");
++      open.href = b.instructions;
++      const line = el("p", "note"); line.append(open); inner.append(line);
++    }
+     li.append(img, inner);
+     return li;
+   }
+diff --git a/src/voxel/webjob.py b/src/voxel/webjob.py
+index 70ab800..86f5d94 100644
+--- a/src/voxel/webjob.py
++++ b/src/voxel/webjob.py
+@@ -24,6 +24,7 @@ from pathlib import Path
+ RESULT_MARK = "VOXEL_RESULT "
+ QUESTIONS_MARK = "VOXEL_QUESTIONS "
+ SETTINGS_FILE = "settings.json"  # in the record: what the person chose on the Build page
++INVENTORY_FILE = "inventory.json"  # in the record: the pieces it could use, and their sets
+ MAX_ANSWER_CHARS = 100
+ 
+ 
+@@ -109,6 +110,10 @@ def run(
+         folder = Path(records_dir) / result.record_id
+         if folder.is_dir():
+             (folder / SETTINGS_FILE).write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
++            try:  # the inventory, with which set each piece comes from: the instructions' parts list
++                (folder / INVENTORY_FILE).write_text(Path(inventory).read_text(encoding="utf-8"), encoding="utf-8")
++            except OSError:
++                pass
+     if result.ok and result.record_id:
+         text = io.StringIO()
+         with contextlib.redirect_stdout(text):
+diff --git a/tests/test_instructions.py b/tests/test_instructions.py
+new file mode 100644
+index 0000000..7a147ed
+--- /dev/null
++++ b/tests/test_instructions.py
+@@ -0,0 +1,214 @@
++"""voxel.instructions: the stepped LDraw text becomes the instructions page's data."""
++
++import json
++
++import bricklayer as bl
++import pytest
++
++from test_site import request, served, upstream  # noqa: F401  (fixtures)
++from voxel.instructions import (
++    INSTRUCTIONS_FILE,
++    NoSteps,
++    build_instructions,
++    main,
++    read_steps,
++    record_instructions,
++    short_name,
++    stepped_ldr,
++    write_instructions,
++)
++from voxel.sequence import sequence, stepped_build
++from voxel.serve import ldraw_response, model_text
++
++# Two steps: a red 2x4 brick and a black plate, then two red bricks on top.
++STEPPED = """\
++1 4 40 -24 20 1 0 0 0 1 0 0 0 1 3001.dat
++1 0 40 -8 60 1 0 0 0 1 0 0 0 1 3020.dat
++0 STEP
++1 4 40 -48 20 1 0 0 0 1 0 0 0 1 3001.dat
++1 4 40 -48 60 1 0 0 0 1 0 0 0 1 3001.dat
++0 STEP
++"""
++RECORD = "20260101-000000-a-red-wall-abc12345"
++
++
++def test_steps_split_at_step_markers():
++    steps = read_steps(STEPPED)
++    assert [len(s) for s in steps] == [2, 2]
++    assert steps[0][0] == {"code": 4, "file": "3001.dat", "matrix": [40, -24, 20, 1, 0, 0, 0, 1, 0, 0, 0, 1]}
++
++
++def test_callouts_count_parts_per_step_and_the_list_counts_them_all():
++    data = build_instructions(STEPPED, "a red wall")
++    assert data["title"] == "a red wall" and data["pieces"] == 4
++    assert [c["name"] for c in data["colors"]] == ["Red", "Black"]
++    assert data["colors"][0]["hex"] == "#C91A09"
++    assert [p["id"] for p in data["parts"]] == ["3001", "3020"]
++    assert data["parts"][0]["name"] == "Brick 2 x 4" and data["parts"][0]["short"] == "2x4 brick"
++    assert data["steps"][0]["callout"] == [{"part": 0, "color": 0, "count": 1}, {"part": 1, "color": 1, "count": 1}]
++    assert data["steps"][1]["callout"] == [{"part": 0, "color": 0, "count": 2}]
++    assert data["steps"][1]["bricks"] == [2, 3]
++    assert [b["step"] for b in data["bricks"]] == [1, 1, 2, 2]
++    # sorted by color name: Black before Red
++    assert data["parts_list"] == [{"part": 1, "color": 1, "count": 1}, {"part": 0, "color": 0, "count": 3}]
++
++
++def test_no_markers_is_one_step_and_empty_steps_are_dropped():
++    text = "0 STEP\n" + STEPPED.replace("0 STEP\n", "") + "0 STEP\n0 STEP\n"
++    assert [len(s) for s in read_steps(text)] == [4]
++
++
++def test_no_parts_raises():
++    with pytest.raises(NoSteps):
++        read_steps("0 STEP\n0 a comment\n")
++
++
++def test_unknown_color_code_gets_a_gray_and_a_plain_name():
++    data = build_instructions("1 9999 0 0 0 1 0 0 0 1 0 0 0 1 3001.dat\n")
++    assert data["colors"][0]["name"] == "Color 9999" and data["colors"][0]["hex"].startswith("#")
++
++
++def test_sub_files_are_expanded_with_their_placement_and_color():
++    text = (
++        "0 FILE main.ldr\n"
++        "1 4 0 0 0 1 0 0 0 1 0 0 0 1 3001.dat\n"
++        "0 STEP\n"
++        "1 1 100 0 0 1 0 0 0 1 0 0 0 1 group.ldr\n"
++        "0 STEP\n"
++        "0 FILE group.ldr\n"
++        "1 16 0 -24 0 1 0 0 0 1 0 0 0 1 3001.dat\n"
++        "1 0 20 -24 0 1 0 0 0 1 0 0 0 1 3001.dat\n"
++    )
++    steps = read_steps(text)
++    assert [len(s) for s in steps] == [1, 2]
++    assert steps[1][0]["code"] == 1  # 16 takes the color of the line that placed the group
++    assert steps[1][0]["matrix"][:3] == [100, -24, 0]
++    assert steps[1][1]["code"] == 0 and steps[1][1]["matrix"][:3] == [120, -24, 0]
++
++
++def test_matches_the_computed_sequence():
++    """The instructions have exactly the pages voxel.sequence computes."""
++    build = bl.LegoBuild()
++    build.add(bl.Element("3958", bl.Color.LIGHT_BLUISH_GRAY), (0, 0, 0))  # 6x6 plate
++    for k in range(9):  # 9 1x1 plates on it: more than one step's worth
++        build.add(bl.Element("3024", bl.Color.RED), (k % 6, k // 6, 1 / 3))
++    pages = sequence(build).pages
++    data = build_instructions(bl.to_ldraw(stepped_build(build, pages)))
++    assert [len(s["bricks"]) for s in data["steps"]] == [len(p) for p in pages]
++    assert sum(r["count"] for r in data["parts_list"]) == 10
++
++
++def make_record(records, name=RECORD, files=None):
++    record = records / name
++    (record / "out").mkdir(parents=True)
++    for path, text in (files or {}).items():
++        (record / path).write_text(text, encoding="utf-8")
++    return record
++
++
++def test_stepped_ldr_prefers_the_stepped_file_and_needs_markers_in_build_ldr(tmp_path):
++    record = make_record(tmp_path, files={"out/build.ldr": STEPPED.replace("0 STEP\n", "")})
++    assert stepped_ldr(record) is None  # build.ldr without markers is not a manual
++    (record / "out" / "build.ldr").write_text(STEPPED, encoding="utf-8")
++    assert stepped_ldr(record).name == "build.ldr"
++    (record / "out" / "build.stepped.ldr").write_text(STEPPED, encoding="utf-8")
++    assert stepped_ldr(record).name == "build.stepped.ldr"
++
++
++def test_title_is_the_typed_request(tmp_path):
++    record = make_record(
++        tmp_path, files={"out/build.stepped.ldr": STEPPED, "settings.json": json.dumps({"request": "a red wall"})}
++    )
++    assert record_instructions(record)["title"] == "a red wall"
++
++
++def test_command_writes_the_file(tmp_path, capsys):
++    record = make_record(tmp_path, files={"out/build.stepped.ldr": STEPPED})
++    assert main([RECORD, "--records-dir", str(tmp_path)]) == 0
++    data = json.loads((record / "out" / INSTRUCTIONS_FILE).read_text(encoding="utf-8"))
++    assert data["pieces"] == 4 and len(data["steps"]) == 2
++    assert "4 pieces in 2 steps" in capsys.readouterr().out
++    assert main(["no-such-record", "--records-dir", str(tmp_path)]) == 1
++    assert write_instructions(make_record(tmp_path, "empty")) is None
++
++
++# --- Serving part shapes ---------------------------------------------------------
++
++
++def test_model_text_is_one_part_in_one_color():
++    text = model_text("file=3001.dat&code=4000&hex=C91A09&edge=5a0b04")
++    assert text.endswith("1 4000 0 0 0 1 0 0 0 1 0 0 0 1 3001.dat\n")
++    assert "VALUE #C91A09 EDGE #5a0b04" in text
++    assert model_text("file=3001.dat&code=4000&hex=zz&edge=000000") is None
++    assert model_text("file=a b.dat&code=1&hex=000000&edge=000000") is None
++    assert model_text("code=1") is None
++
++
++def test_ldraw_files_stay_inside_the_library(tmp_path):
++    library = tmp_path / "ldraw"
++    (library / "parts").mkdir(parents=True)
++    (library / "parts" / "3001.dat").write_text("0 Brick 2 x 4\n", encoding="utf-8")
++    (tmp_path / "secret.txt").write_text("x", encoding="utf-8")
++    assert ldraw_response("/parts/3001.dat", "", library)[0] == 200
++    assert ldraw_response("/parts/../../secret.txt", "", library)[0] == 404
++    assert ldraw_response("/parts/3001.dat", "", None)[0] == 404
++    assert ldraw_response("/other", "", library) is None
++
++
++# --- The website -------------------------------------------------------------------
++
++
++def test_site_serves_the_page_and_the_data(served):
++    site, port, _ = served
++    make_record(site.records_dir, files={"out/build.stepped.ldr": STEPPED})
++    status, body = request(port, "GET", f"/records/{RECORD}/instructions")
++    assert status == 200 and b"Voxel instructions" in body
++    status, body = request(port, "GET", f"/records/{RECORD}/instructions.json")
++    assert status == 200 and json.loads(body)["pieces"] == 4
++    status, body = request(port, "GET", "/ldraw/model?file=3001.dat&code=4000&hex=C91A09&edge=5a0b04")
++    assert status == 200 and body.endswith(b"3001.dat\n")
++
++
++def test_site_has_no_instructions_without_a_stepped_build(served):
++    site, port, _ = served
++    make_record(site.records_dir)
++    assert request(port, "GET", f"/records/{RECORD}/instructions")[0] == 404
++    assert request(port, "GET", f"/records/{RECORD}/instructions.json")[0] == 404
++    assert request(port, "GET", "/records/..%2Fx/instructions.json")[0] == 404
++
++
++@pytest.mark.parametrize(
++    "name, short",
++    [
++        ("Tile 1 x 4 with Groove", "1x4 tile"),
++        ("Plate 1 x 1 Round with Bar", "1x1 round plate with bar"),
++        ("Bracket 1 x 2 - 2 x 2 Up", "1x2 bracket"),
++        ("Brick 2 x 2 x 3", "2x2x3 brick"),
++        ("Slope 45 2 x 2", "2x2 slope"),
++        ("Plate  2 x  4", "2x4 plate"),
++        ("Minifig Head", "minifig head"),
++    ],
++)
++def test_short_names_fit_under_a_picture(name, short):
++    assert short_name(name) == short
++
++
++def test_parts_list_says_which_sets_the_pieces_come_from():
++    inventory = [
++        {"part": "3001", "color": "RED", "count": 2, "sets": {"1111-1": 2}},
++        {"part": "3001", "color": "RED", "count": 5, "sets": {"2222-1": 5}},
++        {"part": "3020", "color": "BLACK", "count": 1, "sets": {"2222-1": 1}},
++    ]
++    data = build_instructions(STEPPED, inventory=inventory)
++    red = next(r for r in data["parts_list"] if data["colors"][r["color"]]["name"] == "Red")
++    assert red["sets"] == [{"set": "1111-1", "count": 2}, {"set": "2222-1", "count": 1}]
++    assert data["sets"] == [{"set": "2222-1", "pieces": 2}, {"set": "1111-1", "pieces": 2}] or data["sets"] == [
++        {"set": "1111-1", "pieces": 2}, {"set": "2222-1", "pieces": 2}]
++
++
++def test_no_set_info_without_an_inventory(tmp_path):
++    record = make_record(tmp_path, files={"out/build.stepped.ldr": STEPPED})
++    data = record_instructions(record)
++    assert data["sets"] == [] and all("sets" not in r for r in data["parts_list"])
++    (record / "inventory.json").write_text(json.dumps([{"part": "3020", "color": 0, "count": 1, "sets": {"9-1": 1}}]))
++    assert record_instructions(record)["sets"] == [{"set": "9-1", "pieces": 1}]
+diff --git a/tests/test_sequence.py b/tests/test_sequence.py
+index 9f5e581..1b2fe7f 100644
+--- a/tests/test_sequence.py
++++ b/tests/test_sequence.py
+@@ -39,21 +39,21 @@ def test_top_first_stack_comes_out_bottom_up():
+     for level in (2, 1, 0):  # written top-first
+         add(build, BRICK, 2, 2, level)
+     result = sequence(build)
+-    assert result.ok and result.pages == [[2, 1, 0]]
++    assert result.ok and result.pages == [[2], [1], [0]]  # a stack: one layer per step
+     assert result.moved == 2
+     stepped = stepped_build(build, result.pages)
+     assert [leaf.bounding_box[0].z for leaf in stepped.flattened_placements] == [0, 1, 2]
+-    assert stepped.step_markers == (3,)
++    assert stepped.step_markers == (1, 2, 3)  # one layer of the stack per step
+     assert step_problems(stepped) == []
+     assert step_problems(build) != []  # the builder's own order would not stand
+ 
+ 
+-def test_sixteen_parts_on_one_part_make_pages_of_12_and_4():
++def test_sixteen_parts_on_one_part_make_pages_of_6_6_and_4():
+     build = bl.LegoBuild()
+     base, studs = plate_with_studs(build, 0, 16)
+     result = sequence(build)
+     assert result.ok
+-    assert result.pages == [[base], studs[:12], studs[12:]]
++    assert result.pages == [[base], studs[:6], studs[6:12], studs[12:]]
+     assert_pages_fit(result, build)
+     assert step_problems(stepped_build(build, result.pages)) == []
+ 
+@@ -63,24 +63,37 @@ def test_parts_on_the_same_part_share_a_page():
+     add(build, PLATE_8X8, 0, 0, 0)  # 0
+     add(build, PLATE_8X8, 10, 0, 0)  # 1
+     a, b = [], []
+-    for k in range(7):  # interleaved in code order: one on A, one on B, ...
++    for k in range(3):  # interleaved in code order: one on A, one on B, ...
+         a.append(len(build.flattened_placements))
+         add(build, PLATE_1X1, k, 0, PLATE_HEIGHT)
+         b.append(len(build.flattened_placements))
+         add(build, PLATE_1X1, 10 + k, 0, PLATE_HEIGHT)
+     result = sequence(build)
+     assert result.ok
+-    assert result.pages == [[0, 1, *a], b]
++    # the plates they sit on come first, then the 1x1s (grouped by the plate they go on)
++    assert result.pages == [[0, 1], [*a, *b]]
+     assert_pages_fit(result, build)
+ 
+ 
++def test_a_part_comes_one_step_after_the_part_it_attaches_to():
++    build = bl.LegoBuild()
++    add(build, PLATE_8X8, 0, 0, 0)  # 0: the base
++    add(build, PLATE_1X1, 0, 0, PLATE_HEIGHT)  # 1: on the base
++    add(build, PLATE_1X1, 0, 0, 2 * PLATE_HEIGHT)  # 2: on part 1
++    result = sequence(build)
++    assert result.ok
++    assert result.pages == [[0], [1], [2]]
++    for k, page in enumerate(result.pages):
++        assert all(placed in sum(result.pages[:k], []) or placed in page for placed in page)
++
++
+ def test_part_resting_on_a_tile_is_placed():
+     build = bl.LegoBuild()
+     add(build, "3003", 0, 0, PLATE_HEIGHT)  # 2x2 brick, written first, on the tile
+     add(build, TILE_2X2, 0, 0, 0)
+     assert build._mating.pairs == ()  # a tile has no studs: nothing clips
+     result = sequence(build)
+-    assert result.ok and result.pages == [[1, 0]]
++    assert result.ok and result.pages == [[1], [0]]
+     assert step_problems(stepped_build(build, result.pages)) == []
+ 
+ 
+@@ -96,9 +109,9 @@ def test_part_with_nothing_under_it_is_unplaced_and_the_walk_stops():
+     assert result.unplaced[0].endswith("(2,2,5)") and result.unplaced[1].endswith("(2,2,6)")
+ 
+ 
+-def test_no_page_has_more_than_12_parts():
++def test_no_page_has_more_than_the_cap():
+     build = bl.LegoBuild()
+-    for k in range(30):  # 30 grounded bricks: pages of 12, 12, then 6 and more
++    for k in range(30):  # 30 grounded bricks: five full pages, then more
+         add(build, BRICK, (k % 6) * 4, (k // 6) * 2, 0)
+     plate_with_studs(build, 40, 25)
+     plate_with_studs(build, 50, 13)
+@@ -108,15 +121,15 @@ def test_no_page_has_more_than_12_parts():
+     assert step_problems(stepped_build(build, result.pages)) == []
+ 
+ 
+-@pytest.mark.parametrize("sizes", [[5, 13, 25, 1], [12, 12], [11, 2, 30], [1] * 40])
+-def test_paginate_never_goes_over_12_and_keeps_order(sizes):
++@pytest.mark.parametrize("sizes", [[5, 13, 25, 1], [6, 6], [5, 2, 30], [1] * 40])
++def test_paginate_never_goes_over_the_cap_and_keeps_order(sizes):
+     this_pass, part = [], 0
+     for anchor, size in enumerate(sizes):
+         for _ in range(size):
+             this_pass.append((part, anchor))
+             part += 1
+     pages = paginate([[(p, GROUND) for p in range(1000, 1003)], this_pass])
+-    assert all(0 < len(page) <= 12 for page in pages)
++    assert all(0 < len(page) <= MAX_STEP_PARTS for page in pages)
+     flat = [p for page in pages for p in page]
+     assert flat == [1000, 1001, 1002, *range(part)]
+ 
+@@ -139,10 +152,10 @@ def write_build(tmp_path, levels):
+ 
+ def test_gate_writes_stepped_and_unordered_ldr(tmp_path):
+     ok, report = dz.final_gate(write_build(tmp_path, [2, 1, 0]), write_inventory(tmp_path))
+-    assert ok and "1 pages" in report
++    assert ok and "3 pages" in report
+     stepped = (tmp_path / "out" / "build.ldr").read_text()
+     unordered = (tmp_path / "out" / "build.unordered.ldr").read_text()
+-    assert stepped.count("0 STEP") == 1 and "0 STEP" not in unordered
++    assert stepped.count("0 STEP") == 3 and "0 STEP" not in unordered
+     heights = lambda text: [line.split()[3] for line in text.splitlines() if line.startswith("1 ")]
+     assert heights(stepped) == heights(unordered)[::-1]  # bottom-up instead of top-first
+ 
+@@ -199,9 +212,9 @@ def test_command_writes_stepped_ldr_and_keeps_build_ldr(tmp_path, capsys):
+     record = fake_record(tmp_path, [2, 1, 0])  # top-first
+     code, out = run_command(tmp_path, record, capsys)
+     assert code == 0
+-    assert out.splitlines()[:4] == ["Parts: 3", "Pages: 1", "Moved from code order: 2", "check_steps: passed"]
++    assert out.splitlines()[:4] == ["Parts: 3", "Pages: 3", "Moved from code order: 2", "check_steps: passed"]
+     stepped = (record / "out" / "build.stepped.ldr").read_text()
+-    assert stepped.count("0 STEP") == 1
++    assert stepped.count("0 STEP") == 3
+     heights = [line.split()[3] for line in stepped.splitlines() if line.startswith("1 ")]
+     assert heights == sorted(heights, key=float, reverse=True)  # LDraw -y is up: bottom first
+     assert (record / "out" / "build.ldr").read_text() == "the builder's build.ldr"
+diff --git a/tests/test_steps.py b/tests/test_steps.py
+index 0433747..6d86e3d 100644
+--- a/tests/test_steps.py
++++ b/tests/test_steps.py
+@@ -60,13 +60,13 @@ def test_no_step_markers_fails():
+     assert not ok and "no step markers" in detail
+ 
+ 
+-def test_step_with_13_parts_fails():
++def test_step_with_7_parts_fails():
+     build = bl.LegoBuild()
+-    for i in range(13):
++    for i in range(7):
+         build.add(bl.Element("3001", RED), (i * 4, 0, 0))
+     build.add_step()
+     ok, detail = run(build)
+-    assert not ok and detail == "step 1: 13 parts (max 12)"
++    assert not ok and detail == "step 1: 7 parts (max 6)"
+ 
+ 
+ def test_trailing_parts_after_last_marker_are_a_step():
